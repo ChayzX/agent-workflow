@@ -180,28 +180,42 @@ export function wrapAgentCommand(cfg: Config, spec: AgentSandboxSpec, cmd: strin
  * per-project) can start commands. Snapshot them and revert any change made during an agent run.
  */
 export class ClaudeStateGuard {
-  private baseline: string | null = null;
-  constructor(private file = join(homedir(), '.claude.json')) {}
+  private baselines = new Map<string, string>();
+  private files: string[];
+  constructor(files?: string | string[]) {
+    this.files = files === undefined ? [join(homedir(), '.claude.json'), ...(process.env.CLAUDE_CONFIG_DIR ? [join(process.env.CLAUDE_CONFIG_DIR, '.claude.json')] : [])] : Array.isArray(files) ? files : [files];
+  }
+  private static nonEmpty(v: unknown): boolean { return !!v && typeof v === 'object' && Object.keys(v as object).length > 0; }
+  /** Only non-empty mcpServers matter; a missing project entry equals an empty one. */
   private pick(o: Record<string, any>): string {
-    const projects = Object.fromEntries(Object.entries(o.projects ?? {}).map(([k, v]: [string, any]) => [k, v?.mcpServers ?? null]));
-    return JSON.stringify({ mcpServers: o.mcpServers ?? null, projects });
+    const projects = Object.fromEntries(Object.entries(o.projects ?? {}).filter(([, v]: [string, any]) => ClaudeStateGuard.nonEmpty(v?.mcpServers)).map(([k, v]: [string, any]) => [k, v.mcpServers]));
+    return JSON.stringify({ mcpServers: ClaudeStateGuard.nonEmpty(o.mcpServers) ? o.mcpServers : null, projects });
+  }
+  private read(f: string): Record<string, any> | null {
+    try { return existsSync(f) ? JSON.parse(readFileSync(f, 'utf8')) : {}; } catch { return null; }
   }
   snapshot(): void {
-    try { this.baseline = this.pick(JSON.parse(readFileSync(this.file, 'utf8'))); } catch { this.baseline = null; }
+    for (const f of this.files) { const o = this.read(f); if (o) this.baselines.set(f, this.pick(o)); }
   }
-  /** Returns true when a change was found and reverted. */
+  /** Returns true when an agent-introduced change was found and reverted. */
   verifyAndRestore(): boolean {
-    if (this.baseline === null || !existsSync(this.file)) return false;
-    let cur: Record<string, any>;
-    try { cur = JSON.parse(readFileSync(this.file, 'utf8')); } catch { return false; }
-    if (this.pick(cur) === this.baseline) return false;
-    const base = JSON.parse(this.baseline) as { mcpServers: unknown; projects: Record<string, unknown> };
-    if (base.mcpServers === null) delete cur.mcpServers; else cur.mcpServers = base.mcpServers;
-    for (const [k, v] of Object.entries(cur.projects ?? {}) as Array<[string, any]>) {
-      const want = base.projects[k];
-      if (want === undefined || want === null) { if (v && 'mcpServers' in v) delete v.mcpServers; } else v.mcpServers = want;
+    let changed = false;
+    for (const f of this.files) {
+      const baseline = this.baselines.get(f);
+      if (baseline === undefined || !existsSync(f)) continue;
+      const cur = this.read(f);
+      if (!cur || this.pick(cur) === baseline) continue;
+      const base = JSON.parse(baseline) as { mcpServers: unknown; projects: Record<string, unknown> };
+      if (base.mcpServers === null) delete cur.mcpServers; else cur.mcpServers = base.mcpServers;
+      for (const [k, v] of Object.entries(cur.projects ?? {}) as Array<[string, any]>) {
+        if (!v || typeof v !== 'object') continue;
+        if (base.projects[k]) v.mcpServers = base.projects[k];
+        else if (ClaudeStateGuard.nonEmpty(v.mcpServers)) v.mcpServers = {};
+      }
+      writeFileSync(f, JSON.stringify(cur, null, 2), { mode: 0o600 });
+      this.baselines.set(f, this.pick(cur));
+      changed = true;
     }
-    writeFileSync(this.file, JSON.stringify(cur, null, 2), { mode: 0o600 });
-    return true;
+    return changed;
   }
 }

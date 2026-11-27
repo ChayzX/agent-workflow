@@ -276,15 +276,46 @@ test('third-pass R3: mcpServers changes in ~/.claude.json are detected and rever
   const d = mkdtempSync(join(tmpdir(), 'orch-r3-'));
   const f = join(d, '.claude.json');
   writeFileSync(f, JSON.stringify({ numStartups: 1, mcpServers: { ok: { command: 'x' } }, projects: { '/w': { allowedTools: [] } } }));
-  const g = new ClaudeStateGuard(f);
+  const g = new ClaudeStateGuard([f]);
   g.snapshot();
+  // Claude creating an ordinary new project entry is not tampering.
+  const norm = JSON.parse(readFileSync(f, 'utf8')); norm.projects['/new-worktree'] = { mcpServers: {}, allowedTools: [] };
+  writeFileSync(f, JSON.stringify(norm));
+  assert.equal(g.verifyAndRestore(), false, 'no false alarm for new empty project entries');
   const cur = JSON.parse(readFileSync(f, 'utf8'));
   cur.numStartups = 2; cur.mcpServers.evil = { command: 'curl evil' }; cur.projects['/w'].mcpServers = { e: { command: 'sh' } };
   writeFileSync(f, JSON.stringify(cur));
   assert.equal(g.verifyAndRestore(), true);
   const after = JSON.parse(readFileSync(f, 'utf8'));
   assert.deepEqual(Object.keys(after.mcpServers), ['ok']);
-  assert.equal(after.projects['/w'].mcpServers, undefined);
+  assert.deepEqual(after.projects['/w'].mcpServers, {});
+  assert.equal(g.verifyAndRestore(), false, 'no repeated alarm after restore');
   assert.equal(after.numStartups, 2, 'unrelated Claude state preserved');
   rmSync(d, { recursive: true, force: true });
+});
+
+test('fourth-pass S1: a PR awaiting human review does not starve other merges; a denied review blocks only that item', async () => {
+  const h = makeHarness(demoBehaviour());
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    const wf = h.sup.workflow;
+    const store = wf.store;
+    // Two work items: W-A sits in 'merging' with a pending human-review approval; W-B is merge_ready.
+    const mk = (key: string) => store.createWorkItem(p0.id, { key, type: 'feature', title: key, description: 'd', acceptance: ['a'], requirement_keys: [], depends_on: [], paths: [], role: 'backend_engineer', complexity: 'low', priority: 0, milestone: null, source: 'plan' });
+    const a = mk('W-A'); mk('W-B');
+    store.patchWorkItem(a.id, { status: 'merging', head_commit: 'abc', pr_number: 7 });
+    h.ctx.policy.request('human_review_required', 'needs review', { projectId: p0.id, requestedBy: 'test', dedup: `human-review:${p0.id}:W-A:abc` });
+    h.ctx.db.run("UPDATE projects SET status='active', plan='{}' WHERE id=?", p0.id);
+    await wf.ws(store.project(p0.id)!).ensure(null); // advance() only proceeds once the workspace exists
+    const calls: string[] = [];
+    (wf as any).continueRemoteMerge = async () => { calls.push('remote'); };
+    await wf.advance(store.project(p0.id)!);
+    assert.equal(calls.length, 0, 'pending approval: no GitHub calls, integration job left for others');
+    const appr = h.ctx.db.get<{ id: string }>("SELECT id FROM approvals WHERE dedup_key=?", `human-review:${p0.id}:W-A:abc`)!;
+    h.ctx.policy.decide(appr.id, false, 'operator');
+    await wf.advance(store.project(p0.id)!);
+    assert.equal(store.workItem(a.id)!.status, 'blocked');
+    assert.match(store.workItem(a.id)!.status_reason ?? '', /denied/);
+    assert.equal(calls.length, 0, 'denied review never retried against GitHub');
+  } finally { await h.sup.workflow.drainJobs(); h.cleanup(); }
 });

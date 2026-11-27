@@ -32,6 +32,7 @@ export class Workflow {
   readonly debate: DebateEngine;
   private jobs = new Map<string, Promise<void>>();
   private lastSync = new Map<string, number>();
+  private lastRemoteCheck = new Map<string, number>();
   private tokenProvider: () => string | null = () => null;
 
   constructor(private ctx: Ctx, private wake: () => void) {
@@ -148,7 +149,17 @@ export class Workflow {
         case 'in_review': this.ensureReviews(p, w); break;
         case 'remediation': this.ensureRemediation(p, w); break;
         case 'merge_ready': this.job(`integration:${p.id}`, p.id, () => this.merge(p, w)); break; // integration-worktree ops serialized per project
-        case 'merging': this.job(`integration:${p.id}`, p.id, () => this.continueRemoteMerge(p, w)); break;
+        case 'merging': {
+          // Never let one PR monopolize the per-project integration job (fairness) or poll GitHub every tick.
+          const appr = this.ctx.policy.status(`human-review:${p.id}:${w.key}:${w.head_commit}`);
+          if (appr?.status === 'pending') break;
+          if (appr?.status === 'denied') { this.block(p, w, `required human review on PR #${w.pr_number} was denied by the operator`); break; }
+          const now = this.ctx.clock.now();
+          if (now - (this.lastRemoteCheck.get(w.id) ?? 0) < 60_000) break;
+          this.lastRemoteCheck.set(w.id, now);
+          this.job(`integration:${p.id}`, p.id, () => this.continueRemoteMerge(p, w));
+          break;
+        }
         case 'merged': this.job(`integration:${p.id}`, p.id, () => this.finalize(p, w)); break;
         case 'implementing': this.repairStalled(p, w); break;
       }
