@@ -20,7 +20,8 @@ const BILLING_KEYS = /^(ANTHROPIC_API_KEY|OPENAI_API_KEY|CODEX_API_KEY)$/;
 /** Allowlisted environment for agent processes: no GitHub/cloud credentials, no API keys unless authorized. */
 export function agentEnv(cfg: Config, provider: string, extra: Record<string, string> = {}, source: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const pc = cfg.providers[provider];
-  const allow = new Set([...BASE_ALLOW, ...NETWORK_ALLOW, ...(PROVIDER_ALLOW[provider] ?? []), ...(pc?.envPassthrough ?? [])]);
+  const billingKeys = pc?.allowApiKeyBilling ? (provider === 'claude' ? ['ANTHROPIC_API_KEY'] : provider === 'codex' ? ['OPENAI_API_KEY', 'CODEX_API_KEY'] : []) : [];
+  const allow = new Set([...BASE_ALLOW, ...NETWORK_ALLOW, ...(PROVIDER_ALLOW[provider] ?? []), ...(pc?.envPassthrough ?? []), ...billingKeys]);
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(source)) {
     if (v === undefined || !allow.has(k)) continue;

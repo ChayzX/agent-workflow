@@ -201,6 +201,19 @@ export class CapacityManager {
         } else {
           this.set(id, { status: 'recovering', next_probe_at: null }, 'reset time passed; canary task allowed');
         }
+      } else if (s.status === 'available' && adapter.capabilities().capacityProbe === 'non-model') {
+        // Proactive, usage-free capacity check so work is never dispatched into a known-exhausted provider.
+        const d = json<{ lastProbeAt?: number }>(s.details, {});
+        if (now - (d.lastProbeAt ?? 0) >= this.cfg.recovery.capacityProbeMinutes * 60_000) {
+          const p = await adapter.probeCapacity().catch(() => null);
+          const fresh = this.get(id);
+          this.db.run('UPDATE provider_state SET details=?, windows=? WHERE provider=?', JSON.stringify({ ...json(fresh.details, {}), lastProbeAt: now }),
+            p?.windows.length ? JSON.stringify(mergeWindows(json(fresh.windows, {}), p.windows)) : fresh.windows, id);
+          if (p?.available === false && fresh.status === 'available') {
+            const resetAt = p.resetAt && p.resetAt > now ? p.resetAt : null;
+            this.markExhausted(id, { cls: 'usage_limit', message: `capacity probe: ${p.detail ?? 'limit reached'}`, resetAt, resetSource: resetAt ? 'provider' : 'none', limitKind: p.windows.find((w) => w.status === 'rejected')?.window ?? 'unknown' });
+          }
+        }
       } else if ((s.status === 'auth_required' || s.status === 'unavailable') && (s.next_probe_at ?? 0) <= now) {
         const ok = s.status === 'auth_required' ? (await adapter.checkAuth().catch(() => ({ ok: false }))).ok : (await adapter.detect().catch(() => ({ installed: false }))).installed;
         if (ok) this.set(id, { status: 'available', next_probe_at: null, consecutive_failures: 0 }, 'auth/CLI check passed');

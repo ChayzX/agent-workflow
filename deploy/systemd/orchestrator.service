@@ -1,0 +1,51 @@
+# System unit for a dedicated, unprivileged service account (recommended on servers).
+#   sudo useradd --system --create-home --home-dir /var/lib/orchestrator --shell /usr/sbin/nologin orchestrator
+#   sudo -u orchestrator -H ORCH_HOME=/var/lib/orchestrator /opt/orchestrator/bin/orchestrator setup
+#   sudo -u orchestrator -H claude login ; sudo -u orchestrator -H codex login --device-auth
+#   sudo install -m 644 deploy/systemd/orchestrator.service /etc/systemd/system/ && sudo systemctl enable --now orchestrator
+[Unit]
+Description=Agent Workflow Orchestrator supervisor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=orchestrator
+Group=orchestrator
+Environment=ORCH_HOME=/var/lib/orchestrator
+Environment=HOME=/var/lib/orchestrator
+WorkingDirectory=/var/lib/orchestrator
+ExecStart=/opt/orchestrator/bin/orchestrator daemon
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=90
+KillMode=control-group
+# Hardening: least privilege, no privilege escalation, read-only system, private /tmp.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/orchestrator
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+UMask=0077
+LimitNOFILE=8192
+MemoryMax=4G
+TasksMax=512
+# Note: bubblewrap needs unprivileged user namespaces; do not set RestrictNamespaces=yes if gates should be sandboxed.
+
+[Install]
+WantedBy=multi-user.target

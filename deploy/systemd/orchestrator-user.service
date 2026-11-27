@@ -1,0 +1,28 @@
+# systemd *user* unit (installed by `orchestrator setup --service`).
+# Start at boot without an interactive login: `sudo loginctl enable-linger $USER` (one-time).
+[Unit]
+Description=Agent Workflow Orchestrator supervisor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=ORCH_HOME=@HOME@
+Environment=PATH=@NODE_DIR@:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=@BIN@ daemon
+Restart=on-failure
+RestartSec=10
+# Graceful shutdown: SIGTERM → agents get the grace period, then are interrupted (resumable).
+KillSignal=SIGTERM
+TimeoutStopSec=90
+# Kill the whole control group (including any provider CLI processes) on stop/crash.
+KillMode=control-group
+NoNewPrivileges=yes
+PrivateTmp=yes
+UMask=0077
+LimitNOFILE=8192
+MemoryMax=4G
+TasksMax=512
+
+[Install]
+WantedBy=default.target
