@@ -63,7 +63,7 @@ export class ClaudeAdapter implements ProviderAdapter {
     if (req.maxTurns ?? this.cfg.maxTurns) args.push('--max-turns', String(req.maxTurns ?? this.cfg.maxTurns));
     if (req.outputSchema) args.push('--json-schema', JSON.stringify(req.outputSchema));
     if (req.mode === 'read-only') {
-      args.push('--permission-mode', 'dontAsk', '--tools', 'Read,Grep,Glob,Bash', '--allowedTools', ...READ_ONLY_TOOLS);
+      args.push('--permission-mode', 'dontAsk', '--tools', 'Read,Grep,Glob,Bash', '--allowedTools', ...(req.osReadOnly ? ['Read', 'Grep', 'Glob', 'Bash'] : READ_ONLY_TOOLS));
     } else {
       args.push('--permission-mode', 'acceptEdits', '--allowedTools', ...WRITE_TOOLS);
     }
@@ -174,7 +174,11 @@ export class ClaudeAdapter implements ProviderAdapter {
     const tail = (run.stderr + '\n' + run.stdout).slice(-3000);
     const failure = classifyText(tail, now);
     if (rejected) Object.assign(failure, { cls: 'usage_limit', resetAt: rejected.resetsAt, resetSource: 'provider', limitKind: rejected.window });
-    if (failure.cls === 'unknown') failure.cls = run.signal ? 'killed' : 'unknown';
+    if (failure.cls === 'unknown' && run.signal) {
+      // stdout is the raw event stream (opaque signatures etc.): report the signal and stderr only.
+      failure.cls = 'killed';
+      failure.message = `terminated by ${run.signal}${run.stderr.trim() ? `: ${run.stderr.trim().slice(-300)}` : ''}`;
+    }
     return { ...base, ok: false, failure };
   }
 }

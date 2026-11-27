@@ -143,6 +143,9 @@ export class Store {
     this.db.run('INSERT INTO checkpoints(id, project_id, work_item_id, task_id, kind, summary, data, created_at) VALUES (?,?,?,?,?,?,?,?)',
       newId('ckpt'), c.projectId, c.workItemId ?? null, c.taskId ?? null, c.kind, c.summary.slice(0, 4000), JSON.stringify(c.data ?? {}).slice(0, 20000), this.clock.now());
   }
+  checkpointsOfKind(projectId: string, workItemId: string, kind: string): CheckpointRow[] {
+    return this.db.all<CheckpointRow>('SELECT * FROM checkpoints WHERE project_id=? AND work_item_id=? AND kind=? ORDER BY created_at', projectId, workItemId, kind);
+  }
   checkpoints(projectId: string, workItemId?: string | null, limit = 8): CheckpointRow[] {
     return workItemId
       ? this.db.all<CheckpointRow>('SELECT * FROM checkpoints WHERE project_id=? AND work_item_id=? ORDER BY created_at DESC LIMIT ?', projectId, workItemId, limit).reverse()

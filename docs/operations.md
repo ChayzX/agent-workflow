@@ -37,6 +37,7 @@ For a personal user install instead, run `./deploy/install.sh`. It installs a sy
 | provider `auth_required` + approval | session expired | re-run `claude login` / `codex login --device-auth` as the service user |
 | provider `disabled` (billing_policy) | API-key auth detected | remove the key, or authorize billing explicitly, then `orchestrator providers reset <id>` |
 | project `blocked` | genuine blocker (e.g. plan invalid 3×, requirement blocked) | read `status_reason`, act, then `orchestrator resume` |
+| work item `blocked` | an investigation judged a blocker external (it may be wrong: tool limits or scope wording are not external) | read `orchestrator logs` for `workitem.blocked`; if it is not genuinely external, `orchestrator unblock D-007 --note "why, and the scope decision"`. The note is audited and shown to the next agent. |
 | `task.lease_expired` events | a worker died | none: automatically requeued and resumed |
 | repeated `job.error` | environment problem (disk, git) | `orchestrator doctor` |
 

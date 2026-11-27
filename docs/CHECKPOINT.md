@@ -3,17 +3,24 @@
 This file is the durable hand-off for the session building this platform. Update it at each
 milestone boundary. Scheduled auto-resume reads "Next executable actions".
 
-## Current milestone (updated 2026-11-27 05:35 UTC)
-- All milestones implemented. `npm test` 36/36. Live wordfreq run COMPLETED with verified release (evidence in
-  docs/evidence/wordfreq-live, matrix in docs/acceptance-matrix.md).
-- Independent review of PR #1 found 12 defects → all fixed in cc58de6 with regression tests; RE-REVIEW requested
-  (reviewer posts a COMMENT review with a verdict on PR #1).
+## Current milestone (updated 2026-11-27 16:10 UTC)
+- Live dual-provider run 2 COMPLETED (verified greet 0.1.0; evidence docs/evidence/greet-dual-provider/SUMMARY.md),
+  on four successive builds and with two operator actions (unblock D-007, cancel D-008).
+- PR #61 (this branch → main) opened. The independent review returned REQUEST_CHANGES: 3 blocking, 7 non-blocking
+  findings. All were addressed in the follow-up commit:
+  - unblock → backlog (dependency re-resolution) or merge_ready when the head is reviewed and gated;
+  - cancel refused from merge_ready, merging and merged; cancel aborts running tasks; block and investigation never
+    revive terminal items;
+  - guidance is queried by kind; the merge-retry bound restarts after an unblock;
+  - audit wording and feedback fixed; the Codex billing guard fails closed;
+  - SUMMARY.md states the builds and the operator rescue.
+- `npm test` 56/56. The release ZIP was rebuilt from the fixed code (release/).
 - Remaining:
-  1. Re-review verdict → fix anything found → merge PR #1 into main (operator authorized agent merges after review).
-  2. After 07:08 UTC Codex reset (scheduled wake 07:12): `node --disable-warning=ExperimentalWarning dist/test/live/live-acceptance.js <scratchpad>/orch-live2`
-     → record cross-provider Q&A/review/debate/audit evidence in docs/acceptance-matrix.md (rows marked ⏳).
-  3. Final self-package ZIP + checksums (orchestrator self-package), attach to a GitHub Release if possible or leave in releases/.
-  4. Delete the hourly "Resume orchestrator build" scheduled task when done.
+  1. Re-review of PR #61 by the same reviewer subagent. Merge only on APPROVE.
+  2. After the merge, close #17, #19, #36, #37, #56 and #57 with evidence; close epics whose sub-issues are all closed.
+  3. Delete the hourly "Resume orchestrator build" task (trig_017TYriJi3K7RCRCucUNw7M5) and report.
+  4. Operator-only items are labelled `needs-operator`; the run book is docs/operator-verification-prompt.md.
+  5. Follow-up: a clean live run on one build, to measure cost without the meta-work loops.
 
 ## Verified facts (live evidence, 2026-11-27)
 - Claude Code CLI 2.1.332, subscription OAuth (`apiKeySource: "none"`). `claude -p --output-format stream-json`
@@ -43,7 +50,7 @@ security: sandbox, policy, secrets
 util: validate
 
 ## Next executable actions (remaining)
-0. Finish live runs above; write docs/acceptance-matrix.md + docs/live-acceptance.md from evidence; self-package + clean-dir install verification; independent review subagent on PR #1, then merge.
+See "Remaining" under Current milestone.
 
 ## Original plan (done unless noted)
 1. Write: providers/simulated.ts + registry; engine/context.ts (prompt builder), team.ts, messages.ts, debate.ts,

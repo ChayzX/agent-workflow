@@ -122,6 +122,8 @@ orchestrator doctor
 | `start --goal F --repo R` | New project from a goal (`R` = `owner/name`, a local git path, or `new`) |
 | `status`, `tasks`, `messages`, `decisions`, `logs [--follow]` | Inspect real persisted state |
 | `pause`, `resume`, `stop` | Project control (queued to the supervisor) |
+| `unblock ITEM --note TEXT` | Return a wrongly blocked work item to ready, with guidance the next agent sees (audited) |
+| `cancel ITEM --note TEXT` | Descope a work item (operator decision, audited; local equivalent of closing its issue as not planned) |
 | `approvals [approve\|deny ID]` | Operator authorizations (spending, re-auth, human review, deploys…) |
 | `release [--out DIR]` | Verified release ZIP location / export |
 | `run` / `daemon` | Foreground supervisor + dashboard (systemd runs `daemon`) |
@@ -141,5 +143,26 @@ orchestrator doctor
 
 ## Status
 
-See `docs/acceptance-matrix.md`. Items are marked **verified-live**, **verified-simulated** (deterministic tests with
-simulated providers and real git/gates), or **unverified** (needs credentials this build environment did not have).
+**v0.1.0.** The build was merged after five rounds of independent agent code review, which found 24 defects, all fixed
+with regression tests. `npm test` passes 56 of 56.
+
+- **Verified live:**
+  - A complete product, `wordfreq`, built autonomously from one goal by real Claude agents. Verified release:
+    `docs/evidence/wordfreq-live/`.
+  - Codex usage-limit detection with provider-reported reset times.
+  - Real Claude limit exhaustion with both providers out, followed by staggered recovery.
+  - Graceful restart.
+  - Confined agent sandbox.
+  - Dual-provider collaboration on `greet` (`docs/evidence/greet-dual-provider/`):
+    - Codex and Claude asked each other questions in both directions.
+    - Each reviewed the other's code, and they debated a design decision into an ADR.
+    - They ran concurrently.
+    - When Codex hit a real usage limit, the work failed over to Claude.
+    - The run recovered from a crash, and operator unblock/cancel commands were used.
+    - The result was a verified release.
+- **Verified with simulated providers:** duplicate prevention, plus the GitHub sync against a fake GitHub.
+- **Pending (needs the operator; issues labelled `needs-operator`):** GitHub mode against the live API (needs a PAT),
+  a fresh-VM install, systemd on a real host, HawkScan DAST, OCI deployment. The run book for a local agent with server
+  access is `docs/operator-verification-prompt.md`.
+
+Details: `docs/acceptance-matrix.md`.

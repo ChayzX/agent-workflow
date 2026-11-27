@@ -79,6 +79,10 @@ test('claude adapter parses real stream-json success output (fake CLI replaying 
   const bin = fakeCli(d, 'claude', `cat >/dev/null; cat ${join(FIX, 'claude-stream-success.jsonl')}`);
   const cfg = defaultConfig(d);
   const a = new ClaudeAdapter({ ...cfg.providers.claude!, command: bin }, new ManualClock(), {});
+  const enforced = a.buildArgs({ prompt: '', cwd: '/w', mode: 'read-only', osReadOnly: true, timeoutMs: 1, env: {}, meta: { taskId: 't', taskKind: 'review', role: 'r', projectId: 'p', attempt: 1 } }, 's');
+  const allowed = enforced.slice(enforced.indexOf('--allowedTools') + 1, enforced.indexOf('--disallowedTools'));
+  assert.ok(allowed.includes('Bash') && !allowed.includes('Edit') && !allowed.includes('Write'), 'OS-enforced read-only review may run commands but never edit');
+  assert.ok(enforced.includes('Bash(git push:*)'), 'always-deny list still applies');
   const r = await a.execute({ prompt: 'x', cwd: d, mode: 'read-only', timeoutMs: 10000, env: { PATH: process.env.PATH! }, outputSchema: { type: 'object' }, meta: { taskId: 't', taskKind: 'answer', role: 'x', projectId: 'p', attempt: 1 } });
   assert.equal(r.ok, true);
   assert.equal(r.sessionId, '5228d4c8-bd75-4d69-b50b-db9aff523182');
@@ -116,7 +120,7 @@ test('codex adapter: real usage-limit JSONL via fake CLI → usage_limit; args i
   const args = a.buildArgs({ prompt: '', cwd: '/w', mode: 'read-only', timeoutMs: 1, env: {}, resumeSessionId: 'abc', model: 'm', effort: 'low', meta: { taskId: 't', taskKind: 'review', role: 'r', projectId: 'p', attempt: 1 } }, '/s.json', '/o.txt');
   assert.deepEqual(args.slice(-3), ['resume', 'abc', '-']);
   assert.ok(args.includes('--output-schema') && args.includes('read-only'));
-  const slow = fakeCli(d, 'codex-slow', `cat >/dev/null; echo '{"type":"thread.started","thread_id":"t9"}'; sleep 30`);
+  const slow = fakeCli(d, 'codex-slow', `if [ "$1" = login ]; then echo "Logged in using ChatGPT"; exit 0; fi; cat >/dev/null; echo '{"type":"thread.started","thread_id":"t9"}'; sleep 30`);
   const s = new CodexAdapter({ ...cfg.providers.codex!, command: slow }, new ManualClock(), {});
   const ac = new AbortController();
   const pr = s.execute({ prompt: 'x', cwd: d, mode: 'read-only', timeoutMs: 20000, env: { PATH: process.env.PATH! }, signal: ac.signal, meta: { taskId: 't', taskKind: 'review', role: 'x', projectId: 'p', attempt: 1 } });
@@ -268,4 +272,30 @@ test('capacity: success that reports a rejected window keeps the provider exhaus
   clock.advance(61_000);
   await cap.tick(new Map());
   db.close();
+});
+
+test('codex billing guard: API-key login is refused at execution time unless billing is authorized', async () => {
+  const d = tmp();
+  const bin = fakeCli(d, 'codex', 'if [ "$1" = login ]; then echo "Logged in using an API key - sk-proj-***"; exit 0; fi; cat >/dev/null; prev=""; for a in "$@"; do if [ "$prev" = "-o" ]; then echo "{}" > "$a"; fi; prev="$a"; done; echo \'{"type":"thread.started","thread_id":"t1"}\'; echo \'{"type":"turn.completed","usage":{}}\'');
+  const cfg = defaultConfig(d);
+  const meta = { taskId: 't', taskKind: 'review' as const, role: 'x', projectId: 'p', attempt: 1 };
+  const a = new CodexAdapter({ ...cfg.providers.codex!, command: bin }, new ManualClock(), { PATH: process.env.PATH! });
+  const r = await a.execute({ prompt: 'x', cwd: d, mode: 'read-only', timeoutMs: 10000, env: { PATH: process.env.PATH! }, meta });
+  assert.equal(r.failure?.cls, 'billing_policy');
+  const b = new CodexAdapter({ ...cfg.providers.codex!, command: bin, allowApiKeyBilling: true }, new ManualClock(), { PATH: process.env.PATH! });
+  const r2 = await b.execute({ prompt: 'x', cwd: d, mode: 'read-only', timeoutMs: 10000, env: { PATH: process.env.PATH! }, meta });
+  assert.notEqual(r2.failure?.cls, 'billing_policy', 'authorized billing proceeds');
+  rmSync(d, { recursive: true, force: true });
+});
+
+test('a killed provider run reports the signal, not the opaque event stream', async () => {
+  const d = tmp();
+  const bin = fakeCli(d, 'claude', `cat >/dev/null; echo '{"type":"system","subtype":"init","session_id":"s1","apiKeySource":"none"}'; echo '{"type":"assistant","signature":"FllKi8a3jEjWwIl8PJ0IgwI7fNnpxnYl8xxNGRaj"}'; kill -TERM $$`);
+  const cfg = defaultConfig(d);
+  const a = new ClaudeAdapter({ ...cfg.providers.claude!, command: bin }, new ManualClock(), {});
+  const r = await a.execute({ prompt: 'x', cwd: d, mode: 'read-only', timeoutMs: 10000, env: { PATH: process.env.PATH! }, meta: { taskId: 't', taskKind: 'answer', role: 'x', projectId: 'p', attempt: 1 } });
+  assert.equal(r.failure?.cls, 'killed');
+  assert.match(r.failure!.message, /^terminated by SIGTERM/);
+  assert.doesNotMatch(r.failure!.message, /FllKi8a/);
+  rmSync(d, { recursive: true, force: true });
 });

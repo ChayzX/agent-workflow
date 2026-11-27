@@ -19,6 +19,8 @@ cfg.providers.claude!.maxConcurrent = 1;
 cfg.providers.codex!.maxConcurrent = 1;
 cfg.supervisor.maxConcurrentAgents = 2;
 cfg.routing.preferOrder = ['codex', 'claude'];
+// ORCH_LIVE_SINGLE=1: one work item only (routed to Codex by preference) to observe Codex asking Claude.
+const single = !!process.env.ORCH_LIVE_SINGLE;
 cfg.routing.failoverAfterMinutes = 60;
 // Explicit, recorded operator authorization for hosts where a provider's login lives outside the service home
 // (e.g. managed cloud containers). Never default: ORCH_LIVE_RELAX=claude must be set deliberately.
@@ -29,10 +31,10 @@ const ctx = createApp({ cfg, echoLogs: false });
 const goal = `# greet — dual-provider live acceptance
 
 A tiny dependency-free Node.js (>= 22) ESM package with two functions, each with node:test tests, and a README.`;
-const p = createProject(ctx, { goal, repo: 'new', name: 'greet-live' });
+const p = createProject(ctx, { goal, repo: 'new', name: single ? 'greet-live-codex-asks' : 'greet-live' });
 const sup = new Supervisor(ctx, { lock: true });
 const ask = (q: string) => `IMPORTANT: this requirement intentionally leaves one detail open. Before writing any code you MUST ask the product_manager this blocking question via the messages array (type "question", blocking true) and return status "needs_input": "${q}". After the answer arrives, implement exactly what was answered.`;
-sup.workflow.applyPlan(p, { agent_id: null, input: '{}', id: 'operator-plan' }, {
+const fullPlan: any = {
   product_name: 'greet', summary: 'Two tiny string functions with tests and docs (live acceptance fixture).',
   requirements: [
     { key: 'R-001', kind: 'functional', title: 'hello(name) greeting', description: 'src/hello.js exports hello(name).', acceptance: ['hello("Ada") returns the confirmed greeting', 'covered by node --test'], mandatory: true, priority: 0 },
@@ -50,7 +52,13 @@ sup.workflow.applyPlan(p, { agent_id: null, input: '{}', id: 'operator-plan' }, 
   gates: [{ name: 'test', command: 'node --test', required: true, kind: 'test' }],
   verify_commands: ['node --test'],
   messages: [],
-});
+};
+if (single) {
+  fullPlan.requirements = fullPlan.requirements.filter((r: any) => r.key === 'R-001');
+  fullPlan.work_items = fullPlan.work_items.filter((w: any) => w.key === 'W-001');
+  fullPlan.decisions = [];
+}
+sup.workflow.applyPlan(p, { agent_id: null, input: '{}', id: 'operator-plan' }, fullPlan);
 writeFileSync(join(home, 'live-project-id'), p.id);
 await sup.start();
 console.log(`live acceptance running: project ${p.id} home ${home}`);

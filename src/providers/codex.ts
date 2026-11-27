@@ -76,7 +76,23 @@ export class CodexAdapter implements ProviderAdapter {
     return args;
   }
 
+  private authCache: { at: number; apiKey: boolean } | null = null;
+
   async execute(req: ExecRequest): Promise<ExecResult> {
+    // Execution-time billing guard: never run `codex exec` on API-key auth unless billing is authorized.
+    if (!this.cfg.allowApiKeyBilling) {
+      if (!this.authCache || this.clock.now() - this.authCache.at > 10 * 60_000) {
+        const a = await this.checkAuth().catch(() => null);
+        // Fail closed: if the login mode cannot be determined, do not risk running on API-key billing.
+        if (!a) return { ok: false, sessionId: null, structured: null, text: '', rateLimits: [], exitCode: null, durationMs: 0,
+          failure: { cls: 'auth', message: 'could not determine the Codex login mode (billing guard); run `codex login status`' } };
+        this.authCache = { at: this.clock.now(), apiKey: !!a.apiKeyBilling };
+      }
+      if (this.authCache?.apiKey) {
+        return { ok: false, sessionId: null, structured: null, text: '', rateLimits: [], exitCode: null, durationMs: 0,
+          failure: { cls: 'billing_policy', message: 'Codex is logged in with an API key; API billing is not authorized (providers.codex.allowApiKeyBilling)' } };
+      }
+    }
     const tmp = mkdtempSync(join(tmpdir(), 'orch-codex-'));
     const schemaPath = req.outputSchema ? join(tmp, 'schema.json') : null;
     if (schemaPath) writeFileSync(schemaPath, JSON.stringify(strictSchema(req.outputSchema!)));
@@ -137,7 +153,7 @@ export class CodexAdapter implements ProviderAdapter {
         const failure = classifyText(msg, now);
         const mapped = classifyCodexErrorInfo(errorInfo);
         if (mapped) failure.cls = mapped;
-        if (failure.cls === 'unknown' && run.signal) failure.cls = 'killed';
+        if (failure.cls === 'unknown' && run.signal) { failure.cls = 'killed'; failure.message = `terminated by ${run.signal}${run.stderr.trim() ? `: ${run.stderr.trim().slice(-300)}` : ''}`; }
         if (failure.cls === 'usage_limit') base.rateLimits.push({ window: failure.limitKind ?? 'unknown', status: 'rejected', resetsAt: failure.resetAt ?? null });
         return { ...base, ok: false, failure };
       }

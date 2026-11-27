@@ -194,6 +194,13 @@ export class Workspace {
     return r.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
   }
 
+  /** Tracked paths at a commit (bounded), for auditors' orientation. */
+  async trackedFiles(dir: string, commit = 'HEAD', max = 200): Promise<string> {
+    const r = await this.gitIn(dir, ['ls-tree', '-r', '--name-only', commit], { allowFail: true });
+    const all = r.stdout.split('\n').filter(Boolean);
+    return all.slice(0, max).map((f) => `- ${f}`).join('\n') + (all.length > max ? `\n- … ${all.length - max} more` : '');
+  }
+
   /** Bounded diff for reviewers: full patch up to maxChars, then a stat summary for the rest. */
   async diff(dir: string, base: string, head: string, maxChars: number): Promise<{ text: string; truncated: boolean; files: string[] }> {
     const files = await this.changedFiles(dir, base, head);

@@ -94,7 +94,7 @@ test('review#7: completion audit never passes with a single auditor (failed audi
 
 test('review#4: symlinks never smuggle outside files into a package; zip refuses escaping links', () => {
   const d = mkdtempSync(join(tmpdir(), 'orch-sym-'));
-  mkdirSync(join(d, 'outside')); writeFileSync(join(d, 'outside', '.credentials.json'), '{"refresh_token":"abcdefghijklmnopqrstuvwxyz0123456789"}');
+  mkdirSync(join(d, 'outside')); writeFileSync(join(d, 'outside', '.credentials.json'), '{"refresh_token":"abcdefghijklmnopqrstuvwxyz0123456789"}'); // orchestrator:allow-secret (test fixture)
   mkdirSync(join(d, 'src'));
   writeFileSync(join(d, 'src', 'README.md'), '# x\n');
   symlinkSync(join(d, 'outside', '.credentials.json'), join(d, 'src', 'notes.md'));
@@ -114,8 +114,8 @@ test('review#4: symlinks never smuggle outside files into a package; zip refuses
 });
 
 test('review#11: secret scanner catches JSON-keyed secrets and Claude OAuth tokens', () => {
-  assert.ok(scanText('a.json', '{ "api_key": "abcdefghijklmnopqrstuvwxyz123456" }').length > 0);
-  assert.ok(scanText('a.json', '"refresh_token":"Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MA"').length > 0);
+  assert.ok(scanText('a.json', '{ "api_key": "abcdefghijklmnopqrstuvwxyz123456" }').length > 0); // orchestrator:allow-secret (test fixture)
+  assert.ok(scanText('a.json', '"refresh_token":"Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MA"').length > 0); // orchestrator:allow-secret (test fixture)
   assert.ok(scanText('c.txt', 'sk-ant-oat01-' + 'A'.repeat(40)).length > 0);
 });
 
@@ -318,4 +318,250 @@ test('fourth-pass S1: a PR awaiting human review does not starve other merges; a
     assert.match(store.workItem(a.id)!.status_reason ?? '', /denied/);
     assert.equal(calls.length, 0, 'denied review never retried against GitHub');
   } finally { await h.sup.workflow.drainJobs(); h.cleanup(); }
+});
+
+test('live finding: an agent "blocked" claim with real changes goes to gates/review instead of investigation', async () => {
+  const base = demoBehaviour();
+  let claimed = false;
+  const h = makeHarness((req, c) => {
+    if (req.meta.taskKind === 'remediate' && req.meta.workItemKey === 'W-001' && !claimed) {
+      claimed = true;
+      writeFileSync(join(req.cwd, 'src/calc.js'), 'export function add(a, b) {\n  return a + b;\n}\n');
+      return { structured: { status: 'blocked', summary: 'fixed but cannot stage (git read-only)', files_changed: ['src/calc.js'], tests_added: [], addressed_finding_ids: [], root_cause: 'x', notes: 'supervisor must stage', messages: [] } };
+    }
+    return base(req, c);
+  });
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    const p = await drive(h, (x) => done(x.status), p0.id, { maxTicks: 600 });
+    assert.equal(p.status, 'completed', p.status_reason ?? '');
+    assert.ok(claimed);
+    const inv = h.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks t JOIN work_items w ON w.id=t.work_item_id WHERE w.key='W-001' AND t.kind='investigate'")!.n;
+    assert.equal(inv, 0, 'no investigation for a blocked claim that left a real fix');
+  } finally { h.cleanup(); }
+});
+
+test('live finding (run 2): gate commands can use git in a worktree (shared repo.git exposed read-only)', async (t) => {
+  const { Workspace } = await import('../src/git/git.js');
+  const { findBwrap, runSandboxed } = await import('../src/security/sandbox.js');
+  if (!findBwrap()) { t.diagnostic('bubblewrap unavailable; skipped'); return; }
+  const base = mkdtempSync(join(tmpdir(), 'orch-gitgate-'));
+  try {
+    const ws = new Workspace(join(base, 'proj'), 'main');
+    await ws.ensure(null);
+    const wt = (await ws.worktree('W-001', 'orch/w-001', await ws.head())).path;
+    const cfg = defaultConfig(join(base, 'orch')); cfg.security.sandbox = 'bwrap';
+    const spec = { cwd: wt, writable: [wt], hide: [base], network: false, readOnlyLast: [join(wt, '.git')] };
+    const env = { PATH: process.env.PATH!, HOME: wt };
+    const without = await runSandboxed(cfg, spec, 'git rev-parse HEAD', env, 10000);
+    assert.notEqual(without.exitCode, 0, 'hidden repo.git breaks git (the bug)');
+    const ok = await runSandboxed(cfg, { ...spec, readOnly: [ws.bare] }, 'git rev-parse HEAD && git ls-files >/dev/null', env, 10000);
+    assert.equal(ok.exitCode, 0, ok.stderr);
+    const write = await runSandboxed(cfg, { ...spec, readOnly: [ws.bare] }, 'git update-ref refs/heads/evil HEAD', env, 10000);
+    assert.notEqual(write.exitCode, 0, 'shared repository stays read-only for gates');
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test('live finding (run 2): auditors are told to read files; a decline with only boolean verdicts is inconclusive, not vague defects', async () => {
+  const base = demoBehaviour();
+  let declined = 0;
+  const prompts: string[] = [];
+  const h = makeHarness((req, c) => {
+    if (req.meta.taskKind === 'completion_audit') {
+      prompts.push(req.prompt);
+      if (declined < 1) {
+        declined++;
+        return { structured: { summary: 'The supplied record contains no README contents.', docs_accurate: false, install_reproducible: false, release_recommended: false, defects: [],
+          requirements: ['R-001', 'R-002', 'R-003'].map((key) => ({ key, status: 'satisfied', evidence: 'gate passed', gap: '' })) } };
+      }
+    }
+    return base(req, c);
+  });
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    const p = await drive(h, (x) => done(x.status), p0.id, { maxTicks: 900 });
+    assert.equal(p.status, 'completed', p.status_reason ?? '');
+    const vague = h.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM work_items WHERE title IN ('Installation is not reproducible','Documentation does not match implementation')")!.n;
+    assert.equal(vague, 0, 'no vague defects from boolean verdicts alone');
+    assert.ok(h.ctx.db.get("SELECT 1 FROM audits WHERE kind='completion' AND status='inconclusive'"), 'decline recorded as inconclusive');
+    assert.ok(prompts.length >= 2);
+    for (const pr of prompts) {
+      assert.match(pr, /Tracked files at the audited commit/);
+      assert.match(pr, /src\/calc\.js/);
+      assert.doesNotMatch(pr, /You cannot run commands/);
+    }
+  } finally { h.cleanup(); }
+});
+
+test('live finding (run 2): boolean audit verdicts never duplicate a concrete defect as vague work items', async () => {
+  const base = demoBehaviour();
+  let n = 0;
+  const h = makeHarness((req, c) => {
+    if (req.meta.taskKind === 'completion_audit' && n < 2) {
+      n++;
+      // Both auditors of the first audit: one concrete defect, plus the boolean verdicts it implies.
+      return { structured: { summary: 'install fails with CRLF', docs_accurate: false, install_reproducible: false, release_recommended: false,
+        defects: [{ severity: 'medium', title: 'Installation fails with CRLF line endings', description: 'README.md:12 test requires LF', paths: ['README.md'], acceptance: ['works with CRLF'] }],
+        requirements: ['R-001', 'R-002', 'R-003'].map((key) => ({ key, status: 'satisfied', evidence: 'src/calc.js:1', gap: '' })) } };
+    }
+    return base(req, c);
+  });
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    const p = await drive(h, (x) => done(x.status), p0.id, { maxTicks: 900 });
+    assert.equal(p.status, 'completed', p.status_reason ?? '');
+    const titles = h.ctx.db.all<{ title: string }>("SELECT title FROM work_items WHERE type='defect'").map((r) => r.title);
+    assert.ok(titles.includes('Installation fails with CRLF line endings'), titles.join(', '));
+    assert.equal(titles.filter((t) => /not reproducible|does not match implementation/.test(t)).length, 0, titles.join(', '));
+  } finally { h.cleanup(); }
+});
+
+test('live finding (run 2): operator can unblock a wrongly blocked item; guidance reaches the agent; audited', async () => {
+  const base = demoBehaviour();
+  const prompts: string[] = [];
+  const h = makeHarness((req, c) => { if (req.meta.workItemKey === 'W-002') prompts.push(req.prompt); return base(req, c); });
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    let blocked = false;
+    const p = await drive(h, (x) => done(x.status), p0.id, { maxTicks: 900, onTick: () => {
+      const w = h.sup.workflow.store.workItemByKey(p0.id, 'W-002');
+      if (!blocked && w && ['ready', 'implementing'].includes(w.status)) {
+        blocked = true;
+        h.ctx.db.run("UPDATE work_items SET status='blocked', status_reason='agent claimed an external blocker' WHERE id=?", w.id);
+        h.ctx.queue.cancelForWorkItem(w.id, 'blocked');
+        issueCommand(h.ctx, 'unblock_item', p0.id, { key: 'W-002', note: 'Not an external blocker: gate results are execution evidence.' }, 'operator');
+      }
+    } });
+    assert.ok(blocked, 'item was blocked during the run');
+    assert.equal(p.status, 'completed', p.status_reason ?? '');
+    assert.ok(prompts.some((x) => x.includes('Operator guidance') && x.includes('gate results are execution evidence')), 'guidance delivered to the agent');
+    assert.ok(h.ctx.db.get("SELECT 1 FROM audit_log WHERE action='workitem.unblock'"), 'unblock is in the audit log');
+    assert.equal(h.sup.workflow.unblock(h.sup.workflow.store.project(p0.id)!, 'W-002', 'x', 'operator'), 'W-002 is done, not blocked');
+  } finally { h.cleanup(); }
+});
+
+test('live finding (run 2): operator cancel descopes a vague item; the project still completes; audited', async () => {
+  const h = makeHarness(demoBehaviour());
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    let cancelled = false;
+    const p = await drive(h, (x) => done(x.status), p0.id, { maxTicks: 900, onTick: () => {
+      const cur = h.sup.workflow.store.project(p0.id)!;
+      if (!cancelled && cur.status === 'active') {
+        cancelled = true;
+        const d = h.sup.workflow.createDefect(cur, { title: 'Documentation does not match implementation', description: 'vague', severity: 'medium', paths: [], source: 'completion-audit', acceptance: ['docs accurate'] });
+        issueCommand(h.ctx, 'cancel_item', p0.id, { key: d.key, note: 'vague audit verdict; superseded' }, 'operator');
+      }
+    } });
+    assert.ok(cancelled);
+    assert.equal(p.status, 'completed', p.status_reason ?? '');
+    assert.equal(h.ctx.db.get<{ status: string }>("SELECT status FROM work_items WHERE title='Documentation does not match implementation'")!.status, 'cancelled');
+    assert.ok(h.ctx.db.get("SELECT 1 FROM audit_log WHERE action='workitem.descoped'"));
+  } finally { h.cleanup(); }
+});
+
+test('PR #61 review #1: unblock re-runs dependency resolution (a dependent never starts while its dependency is blocked)', async () => {
+  const h = makeHarness(demoBehaviour());
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    const wf = h.sup.workflow;
+    let phase = 0; let violated = false; let reblocked = false;
+    const p = await drive(h, (x) => done(x.status), p0.id, { maxTicks: 1200, onTick: () => {
+      const w1 = wf.store.workItemByKey(p0.id, 'W-001'); const w2 = wf.store.workItemByKey(p0.id, 'W-002');
+      if (!w1 || !w2) return;
+      if (w1.status === 'blocked' && ['implementing', 'gating', 'in_review'].includes(w2.status)) violated = true;
+      if (phase === 0 && ['ready', 'implementing'].includes(w1.status) && w2.status === 'backlog') {
+        h.ctx.db.run("UPDATE work_items SET status='blocked' WHERE id=?", w1.id); h.ctx.queue.cancelForWorkItem(w1.id, 'test block'); phase = 1;
+      } else if (phase === 1 && w2.status === 'blocked') {
+        issueCommand(h.ctx, 'unblock_item', p0.id, { key: 'W-002', note: 'try again' }, 'operator'); phase = 2;
+      } else if (phase === 2 && w2.status === 'blocked' && wf.store.checkpointsOfKind(p0.id, w2.id, 'operator_unblock').length === 1) {
+        reblocked = true;
+        issueCommand(h.ctx, 'unblock_item', p0.id, { key: 'W-001', note: 'dependency fixed' }, 'operator'); phase = 3;
+      } else if (phase === 3 && w1.status !== 'blocked') {
+        // W-002 and W-003 both depend on W-001; the resolver blocked both. Unblock every dependent.
+        for (const w of wf.store.workItems(p0.id).filter((x) => x.status === 'blocked')) issueCommand(h.ctx, 'unblock_item', p0.id, { key: w.key, note: 'dependency is back' }, 'operator');
+        phase = 4;
+      }
+    } });
+    assert.ok(reblocked, `dependent was re-blocked by the resolver after unblock (phase ${phase})`);
+    assert.equal(violated, false, 'dependent never started while its dependency was blocked');
+    assert.equal(p.status, 'completed', p.status_reason ?? '');
+  } finally { h.cleanup(); }
+});
+
+test('PR #61 review #2/#5/#7: cancel refused once integration starts; block never revives a cancelled item; limits restart after unblock', async () => {
+  const h = makeHarness(demoBehaviour());
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    const p = await drive(h, (x) => done(x.status), p0.id, { maxTicks: 900 });
+    assert.equal(p.status, 'completed', p.status_reason ?? '');
+    const wf = h.sup.workflow; const proj = wf.store.project(p0.id)!;
+    assert.match(wf.cancelItem(proj, 'W-001', 'x', 'operator'), /not cancelled/);
+    for (const st of ['merge_ready', 'merging', 'merged']) {
+      h.ctx.db.run('UPDATE work_items SET status=? WHERE key=? AND project_id=?', st, 'W-002', p0.id);
+      assert.match(wf.cancelItem(proj, 'W-002', 'x', 'operator'), /integration started or finished/, st);
+    }
+    // block() on a cancelled item is a no-op (late results cannot revive descoped work).
+    h.ctx.db.run("UPDATE work_items SET status='remediation' WHERE key='W-003' AND project_id=?", p0.id);
+    assert.equal(wf.cancelItem(proj, 'W-003', 'descoped', 'operator'), 'ok');
+    (wf as any).block(proj, wf.store.workItemByKey(p0.id, 'W-003')!, 'late failure');
+    assert.equal(wf.store.workItemByKey(p0.id, 'W-003')!.status, 'cancelled');
+    // Investigation limit counts only since the last operator unblock.
+    h.ctx.db.run("UPDATE work_items SET status='remediation' WHERE key='W-002' AND project_id=?", p0.id);
+    const w2 = wf.store.workItemByKey(p0.id, 'W-002')!;
+    for (let i = 0; i < 3; i++) {
+      const { task } = h.ctx.queue.enqueue({ projectId: p0.id, kind: 'investigate', role: 'engineering_director', workItemId: w2.id, idempotencyKey: `test-inv-${i}`, input: {}, readOnly: true } as any);
+      h.ctx.db.run("UPDATE tasks SET status='succeeded', processed=1 WHERE id=?", task.id);
+    }
+    h.clock.advance(1000);
+    (wf as any).requestInvestigation(proj, w2, 'still failing');
+    assert.equal(wf.store.workItemByKey(p0.id, 'W-002')!.status, 'blocked', 'limit reached → blocked');
+    h.clock.advance(1000);
+    assert.equal(wf.unblock(proj, 'W-002', 'operator looked at it', 'operator'), 'ok');
+    h.ctx.db.run("UPDATE work_items SET status='remediation' WHERE id=?", w2.id);
+    h.clock.advance(1000);
+    (wf as any).requestInvestigation(proj, wf.store.workItemByKey(p0.id, 'W-002')!, 'new failure');
+    assert.notEqual(wf.store.workItemByKey(p0.id, 'W-002')!.status, 'blocked', 'counter restarted after unblock');
+    assert.ok(h.ctx.db.get("SELECT 1 FROM tasks WHERE work_item_id=? AND kind='investigate' AND status='queued'", w2.id), 'a new investigation was queued');
+  } finally { h.cleanup(); }
+});
+
+test('PR #61 review #8: release recommended but docs/install marked false without a defect is inconclusive, not a pass', async () => {
+  const base = demoBehaviour();
+  let n = 0;
+  const h = makeHarness((req, c) => {
+    if (req.meta.taskKind === 'completion_audit' && n < 1) {
+      n++;
+      return { structured: { summary: 'looks fine', docs_accurate: false, install_reproducible: true, release_recommended: true, defects: [],
+        requirements: ['R-001', 'R-002', 'R-003'].map((key) => ({ key, status: 'satisfied', evidence: 'src/calc.js:1', gap: '' })) } };
+    }
+    return base(req, c);
+  });
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    const p = await drive(h, (x) => done(x.status), p0.id, { maxTicks: 900 });
+    assert.equal(p.status, 'completed', p.status_reason ?? '');
+    const audits = h.ctx.db.all<{ status: string; result: string }>("SELECT status, result FROM audits WHERE kind='completion' ORDER BY created_at");
+    assert.equal(audits[0]!.status, 'inconclusive');
+    assert.match(audits[0]!.result, /without a concrete defect/);
+    assert.equal(h.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM work_items WHERE type='defect'")!.n, 0);
+  } finally { h.cleanup(); }
+});
+
+test('PR #61 review #9: runGates passes the shared repository to the gate sandbox (git works in gates)', async (t) => {
+  const { findBwrap } = await import('../src/security/sandbox.js');
+  if (!findBwrap()) { t.diagnostic('bubblewrap unavailable; skipped'); return; }
+  const { runGates } = await import('../src/engine/gates.js');
+  const h = makeHarness(demoBehaviour(), (c) => { c.security.sandbox = 'bwrap'; });
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    const ws = h.sup.workflow.ws(p0);
+    await ws.ensure(null);
+    const head = await ws.head();
+    const gates = [{ name: 'git', command: 'git rev-parse HEAD', required: true, kind: 'test' }] as any;
+    const without = await runGates(h.ctx, { projectId: p0.id, workItemId: null, scope: 'test', cwd: ws.integration, commit: head, gates });
+    const withGit = await runGates(h.ctx, { projectId: p0.id, workItemId: null, scope: 'test', cwd: ws.integration, commit: head, gates, gitDir: ws.bare });
+    assert.equal(without.passed, false, 'without gitDir the worktree pointer dangles');
+    assert.equal(withGit.passed, true, 'with gitDir git works read-only');
+  } finally { h.cleanup(); }
 });
