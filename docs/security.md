@@ -56,10 +56,20 @@ These require an operator approval (`orchestrator approvals`, or the dashboard):
 - **Agents see only their own provider's session directories.** Those providers' settings, hook and config files are
   read-only to agents. Supervisor-side CLI calls (version, auth status, the Codex app-server probe) run in the same
   confinement.
-- **A startup self-check verifies each provider authenticates inside the sandbox.** If authentication only works when
-  other accounts' homes are visible, as on managed hosts that keep the login elsewhere, that single aspect is relaxed for
-  that provider and recorded as an audited `security.sandbox_relaxed` warning. `$ORCH_HOME` and the service user's home
-  stay hidden in all cases.
+- **A startup self-check verifies each provider authenticates inside the sandbox, and it fails closed.** If
+  authentication only works when other accounts' homes are visible (managed hosts that keep the login elsewhere), the
+  supervisor does **not** widen access on its own. Instead it:
+  - raises a `credential_expansion` approval;
+  - marks the provider `auth_required`;
+  - relaxes that one aspect only after operator approval, or when `security.agentSandboxRelaxFor` names the provider.
+  The relaxation is audited. The recommended fix is to run `claude login` / `codex login` as the service user, so
+  credentials live in its own home. `$ORCH_HOME` and the service user's home stay hidden in all cases.
+- **Provider configuration agents could plant is read-only:**
+  - Claude: `settings*.json`, hooks, plugins, agents, commands and skills.
+  - Codex: `config.toml`, `hooks.json` and rules.
+  - Missing files are created with neutral defaults first.
+  - `~/.claude.json` must stay writable, so its `mcpServers` entries are snapshotted at startup, and any change during an
+    agent run is reverted and audited.
 - **Supervisor git operations** run with hooks disabled (`core.hooksPath=/dev/null`), `fsmonitor` off and `ext::` transport disabled. The shared repository config is reduced to an allowlist before every fetch and push, so agents cannot redirect authenticated pushes (`url.*.insteadOf`, `http.*`, `include.*`, credential helpers).
 - **Without bubblewrap**, gate commands also run unsandboxed (`doctor` warns about this).
 - **The dashboard has a single operator role.** There are no per-user accounts.

@@ -20,6 +20,9 @@ cfg.providers.codex!.maxConcurrent = 1;
 cfg.supervisor.maxConcurrentAgents = 2;
 cfg.routing.preferOrder = ['codex', 'claude'];
 cfg.routing.failoverAfterMinutes = 60;
+// Explicit, recorded operator authorization for hosts where a provider's login lives outside the service home
+// (e.g. managed cloud containers). Never default: ORCH_LIVE_RELAX=claude must be set deliberately.
+if (process.env.ORCH_LIVE_RELAX) cfg.security.agentSandboxRelaxFor = process.env.ORCH_LIVE_RELAX.split(',');
 saveConfig(cfg);
 const ctx = createApp({ cfg, echoLogs: false });
 
