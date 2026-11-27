@@ -431,7 +431,13 @@ export class Workflow {
       const r = await gh.merge(w.pr_number, w.head_commit);
       if (!r.merged) {
         if (r.needsHuman) {
-          this.ctx.policy.request('human_review_required', `PR #${w.pr_number} (${w.key}) requires a human review per repository rules: ${r.reason}`, { projectId: p.id, requestedBy: 'supervisor', dedup: approvalKey, payload: { pr: w.pr_number } });
+          if (appr?.status === 'approved') {
+            // The operator approved here, but GitHub still demands a review: the orchestrator never impersonates one.
+            this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'merge_rejected_after_approval', summary: r.reason });
+            if (this.epoch(w, 'merge_rejected_after_approval') >= 3) this.block(p, w, `PR #${w.pr_number} still requires a GitHub review after operator approval: review it on GitHub, then resume the project`);
+            return;
+          }
+          this.ctx.policy.request('human_review_required', `PR #${w.pr_number} (${w.key}) requires a human review per repository rules: ${r.reason}. Review and approve the PR on GitHub first (the orchestrator never impersonates reviewers), then approve here to let the merge proceed.`, { projectId: p.id, requestedBy: 'supervisor', dedup: approvalKey, payload: { pr: w.pr_number } });
           this.store.patchWorkItem(w.id, { status_reason: `awaiting required human review on PR #${w.pr_number}` });
         } else {
           this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'merge_rejected', summary: r.reason });
