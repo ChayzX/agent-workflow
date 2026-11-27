@@ -23,7 +23,7 @@ export function excerpt(out: string, max: number): string {
   return `${head}\n[... ${clean.length - max} chars omitted ...]\n${clean.slice(-Math.floor(max * 0.75))}`;
 }
 
-export async function runGates(ctx: Ctx, opts: { projectId: string; workItemId: string | null; scope: string; cwd: string; commit: string; gates: QualityGate[] }): Promise<GateSummary> {
+export async function runGates(ctx: Ctx, opts: { projectId: string; workItemId: string | null; scope: string; cwd: string; commit: string; gates: QualityGate[]; gitDir?: string }): Promise<GateSummary> {
   const results: GateResult[] = [];
   const logDir = join(ctx.paths.gateLogs, opts.projectId, opts.commit.slice(0, 12));
   mkdirSync(logDir, { recursive: true, mode: 0o700 });
@@ -34,7 +34,7 @@ export async function runGates(ctx: Ctx, opts: { projectId: string; workItemId: 
     const started = ctx.clock.now();
     const r = await runSandboxed(
       ctx.cfg,
-      { cwd: opts.cwd, writable: [opts.cwd, home], hide: [ctx.paths.home], network: ctx.cfg.security.gateNetwork, readOnlyLast: [join(opts.cwd, '.git')] },
+      { cwd: opts.cwd, writable: [opts.cwd, home], readOnly: opts.gitDir ? [opts.gitDir] : [], hide: [ctx.paths.home], network: ctx.cfg.security.gateNetwork, readOnlyLast: [join(opts.cwd, '.git')] },
       g.command,
       gateEnv(ctx.cfg, home),
       (g.timeout_sec ?? 900) * 1000,

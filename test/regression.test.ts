@@ -340,3 +340,55 @@ test('live finding: an agent "blocked" claim with real changes goes to gates/rev
     assert.equal(inv, 0, 'no investigation for a blocked claim that left a real fix');
   } finally { h.cleanup(); }
 });
+
+test('live finding (run 2): gate commands can use git in a worktree (shared repo.git exposed read-only)', async (t) => {
+  const { Workspace } = await import('../src/git/git.js');
+  const { findBwrap, runSandboxed } = await import('../src/security/sandbox.js');
+  if (!findBwrap()) { t.diagnostic('bubblewrap unavailable; skipped'); return; }
+  const base = mkdtempSync(join(tmpdir(), 'orch-gitgate-'));
+  try {
+    const ws = new Workspace(join(base, 'proj'), 'main');
+    await ws.ensure(null);
+    const wt = (await ws.worktree('W-001', 'orch/w-001', await ws.head())).path;
+    const cfg = defaultConfig(join(base, 'orch')); cfg.security.sandbox = 'bwrap';
+    const spec = { cwd: wt, writable: [wt], hide: [base], network: false, readOnlyLast: [join(wt, '.git')] };
+    const env = { PATH: process.env.PATH!, HOME: wt };
+    const without = await runSandboxed(cfg, spec, 'git rev-parse HEAD', env, 10000);
+    assert.notEqual(without.exitCode, 0, 'hidden repo.git breaks git (the bug)');
+    const ok = await runSandboxed(cfg, { ...spec, readOnly: [ws.bare] }, 'git rev-parse HEAD && git ls-files >/dev/null', env, 10000);
+    assert.equal(ok.exitCode, 0, ok.stderr);
+    const write = await runSandboxed(cfg, { ...spec, readOnly: [ws.bare] }, 'git update-ref refs/heads/evil HEAD', env, 10000);
+    assert.notEqual(write.exitCode, 0, 'shared repository stays read-only for gates');
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test('live finding (run 2): auditors are told to read files; a decline with only boolean verdicts is inconclusive, not vague defects', async () => {
+  const base = demoBehaviour();
+  let declined = 0;
+  const prompts: string[] = [];
+  const h = makeHarness((req, c) => {
+    if (req.meta.taskKind === 'completion_audit') {
+      prompts.push(req.prompt);
+      if (declined < 1) {
+        declined++;
+        return { structured: { summary: 'The supplied record contains no README contents.', docs_accurate: false, install_reproducible: false, release_recommended: false, defects: [],
+          requirements: ['R-001', 'R-002', 'R-003'].map((key) => ({ key, status: 'satisfied', evidence: 'gate passed', gap: '' })) } };
+      }
+    }
+    return base(req, c);
+  });
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    const p = await drive(h, (x) => done(x.status), p0.id, { maxTicks: 900 });
+    assert.equal(p.status, 'completed', p.status_reason ?? '');
+    const vague = h.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM work_items WHERE title IN ('Installation is not reproducible','Documentation does not match implementation')")!.n;
+    assert.equal(vague, 0, 'no vague defects from boolean verdicts alone');
+    assert.ok(h.ctx.db.get("SELECT 1 FROM audits WHERE kind='completion' AND status='inconclusive'"), 'decline recorded as inconclusive');
+    assert.ok(prompts.length >= 2);
+    for (const pr of prompts) {
+      assert.match(pr, /Tracked files at the audited commit/);
+      assert.match(pr, /src\/calc\.js/);
+      assert.doesNotMatch(pr, /You cannot run commands/);
+    }
+  } finally { h.cleanup(); }
+});

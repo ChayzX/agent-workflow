@@ -226,7 +226,7 @@ export class Workflow {
     const dir = ws.wtPath(w.key);
     const head = await ws.head(dir);
     if (head !== w.head_commit) this.store.patchWorkItem(w.id, { head_commit: head });
-    const s = await runGates(this.ctx, { projectId: p.id, workItemId: w.id, scope: 'task', cwd: dir, commit: head, gates: this.store.settings(p).gates });
+    const s = await runGates(this.ctx, { projectId: p.id, workItemId: w.id, scope: 'task', cwd: dir, commit: head, gates: this.store.settings(p).gates, gitDir: this.ws(p).bare });
     if (s.passed) {
       const cur = this.store.workItem(w.id)!;
       const blocking = this.store.findings(p.id, { workItemId: w.id, statuses: ['open', 'fixed_claimed'] }).filter((f) => isBlocking(f.severity));
@@ -402,7 +402,7 @@ export class Workflow {
     if (!staged.ok) { this.toRemediation(p, w, 'conflicts', { conflicts: staged.conflicts }); return; }
     const prevMain = await ws.head();
     const mergeSha = await ws.commitMerge(`Merge ${w.key}: ${w.title}`);
-    const s = await runGates(this.ctx, { projectId: p.id, workItemId: w.id, scope: 'merge', cwd: ws.integration, commit: mergeSha, gates: this.store.settings(p).gates });
+    const s = await runGates(this.ctx, { projectId: p.id, workItemId: w.id, scope: 'merge', cwd: ws.integration, commit: mergeSha, gates: this.store.settings(p).gates, gitDir: this.ws(p).bare });
     if (!s.passed) {
       await ws.gitIn(ws.integration, ['reset', '--hard', prevMain]);
       this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'merge_gate_failure', summary: `merge verification failed: ${s.results.filter((r) => r.status !== 'pass').map((r) => r.name).join(', ')}` });
@@ -458,7 +458,7 @@ export class Workflow {
     if (this.epoch(w, 'post_merge_verified') > 0) return;
     const ws = this.ws(p);
     const main = await ws.syncDefaultFromRemote(); // throws → job error → retried next tick (item stays merged)
-    const s = await runGates(this.ctx, { projectId: p.id, workItemId: w.id, scope: 'post-merge', cwd: ws.integration, commit: main, gates: this.store.settings(p).gates });
+    const s = await runGates(this.ctx, { projectId: p.id, workItemId: w.id, scope: 'post-merge', cwd: ws.integration, commit: main, gates: this.store.settings(p).gates, gitDir: this.ws(p).bare });
     if (!s.passed) this.createDefect(p, { title: `Default branch fails quality gates after merging ${w.key}`, description: failedGateText(s), severity: 'high', paths: json(w.paths, []), source: 'post-merge-gates', acceptance: ['All required quality gates pass on the default branch'] });
     this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'post_merge_verified', summary: `default branch synced to ${main.slice(0, 8)}; gates ${s.passed ? 'pass' : 'FAIL (defect opened)'}` });
   }
@@ -585,7 +585,7 @@ export class Workflow {
         const ws = this.ws(p);
         if (p.repo_mode === 'github') await ws.syncDefaultFromRemote();
         const head = await ws.head();
-        const s = await runGates(this.ctx, { projectId: p.id, workItemId: null, scope: 'audit', cwd: ws.integration, commit: head, gates: this.store.settings(p).gates });
+        const s = await runGates(this.ctx, { projectId: p.id, workItemId: null, scope: 'audit', cwd: ws.integration, commit: head, gates: this.store.settings(p).gates, gitDir: this.ws(p).bare });
         this.ctx.db.run("UPDATE audits SET status='running', commit_sha=?, result=?, updated_at=? WHERE id=?", head, JSON.stringify({ gatesPassed: s.passed }), this.ctx.clock.now(), audit.id);
         const enabled = [...this.ctx.adapters.keys()].filter((k) => this.ctx.cfg.providers[k]?.enabled && this.ctx.capacity.get(k).status !== 'disabled');
         const pins = enabled.length >= 2 ? [enabled[0]!, enabled[1]!] : [null, null];
@@ -620,6 +620,7 @@ export class Workflow {
     const problems: string[] = [];
     const gaps = new Map<string, string>();
     const defects: Array<{ severity: string; title: string; description: string; paths: string[]; acceptance: string[] }> = [];
+    const vague: typeof defects = [];
     if (!result.gatesPassed) problems.push('required quality gates fail on the audited commit');
     const blockingFindings = this.store.findings(p.id, { statuses: ['open', 'fixed_claimed'] }).filter((f) => SEVERITY_RANK[f.severity] >= SEVERITY_RANK.high);
     if (blockingFindings.length) problems.push(`${blockingFindings.length} critical/high findings remain open`);
@@ -635,8 +636,9 @@ export class Workflow {
       }
       for (const d of o.defects ?? []) if (SEVERITY_RANK[d.severity as Severity] >= SEVERITY_RANK.medium) defects.push(d);
       if (!o.release_recommended) problems.push(`${t.provider} auditor does not recommend release`);
-      if (o.docs_accurate === false) defects.push({ severity: 'medium', title: 'Documentation does not match implementation', description: o.summary, paths: ['README.md', 'docs/'], acceptance: ['Documentation accurately describes installation and usage of the implemented system'] });
-      if (o.install_reproducible === false) defects.push({ severity: 'high', title: 'Installation is not reproducible', description: o.summary, paths: [], acceptance: ['Documented installation succeeds from a clean checkout'] });
+      // Boolean verdicts without a concrete defect are not actionable on their own (see inconclusive handling below).
+      if (o.docs_accurate === false) vague.push({ severity: 'medium', title: 'Documentation does not match implementation', description: o.summary, paths: ['README.md', 'docs/'], acceptance: ['Documentation accurately describes installation and usage of the implemented system'] });
+      if (o.install_reproducible === false) vague.push({ severity: 'high', title: 'Installation is not reproducible', description: o.summary, paths: [], acceptance: ['Documented installation succeeds from a clean checkout'] });
     }
     for (const r of reqs.filter((x) => x.mandatory)) {
       const covered = (o: TaskRow) => (json<any>(o.output, {}).requirements ?? []).some((x: any) => x.key === r.key);
@@ -644,6 +646,7 @@ export class Workflow {
     }
     const declines = succeeded.filter((t) => !json<any>(t.output, {}).release_recommended);
     const onlyDeclines = !gaps.size && !defects.length && problems.length > 0 && problems.every((x) => x.endsWith('does not recommend release') || x.startsWith('independent auditor(s) failed'));
+    if (!onlyDeclines) defects.push(...vague);
     if (onlyDeclines) {
       // A decline without a concrete unsatisfied requirement or defect is not actionable: re-audit with feedback, then escalate.
       const prev = this.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM audits WHERE project_id=? AND kind='completion' AND status='inconclusive' AND created_at > COALESCE((SELECT MAX(created_at) FROM audits WHERE project_id=? AND kind='completion' AND status IN ('failed','passed')), 0)", p.id, p.id)!.n;
@@ -953,7 +956,7 @@ export class Workflow {
       case 'review': case 'security_review': {
         const d = await ws.diff(cwd, p.default_branch, w!.head_commit ?? 'HEAD', this.ctx.cfg.limits.maxDiffChars);
         extra.diff = '```diff\n' + d.text + '\n```';
-        extra['Quality gates already run by the supervisor on this exact commit (you cannot run commands; do not re-request them)'] =
+        extra['Quality gates already run by the supervisor on this exact commit (first-hand evidence; no need to re-run them)'] =
           gateEvidence(this.ctx, p.id, w!.head_commit ?? '').map((g) => `- ${g.name}: ${g.status} (\`${g.command}\`, exit ${g.exit_code})`).join('\n') || '(none recorded)';
         break;
       }
@@ -982,12 +985,15 @@ export class Workflow {
       }
       case 'integration_audit':
         extra.requirements = this.store.requirements(p.id).map((r) => `- ${r.key} [${r.status}] ${r.title}`).join('\n');
-        extra.merged = this.store.workItems(p.id, ['done', 'merged']).map((x) => `- ${x.key} ${x.title} (${x.merged_commit?.slice(0, 8)})`).join('\n');
+        extra.merged = this.store.workItems(p.id, ['done', 'merged']).map((x) => `- ${x.key} [${x.status}, merged ${x.merged_commit?.slice(0, 8) ?? '-'}] ${x.type === 'defect' ? 'fixed defect: ' : ''}${x.title}`).join('\n')
+          + '\n(Defect titles describe the problem that was reported and has since been fixed and merged; they are not open issues.)';
+        extra.files = await ws.trackedFiles(ws.integration, 'HEAD');
         break;
       case 'completion_audit': {
         extra.requirements = this.store.requirements(p.id).map((r) => `- ${r.key}${r.mandatory ? ' (mandatory)' : ''} [${r.status}] ${r.title}\n  acceptance: ${json<string[]>(r.acceptance, []).join('; ')}\n  evidence: ${json<unknown[]>(r.evidence, []).slice(-4).map((e) => JSON.stringify(e)).join('; ')}${r.blocker ? `\n  BLOCKER: ${r.blocker}` : ''}`).join('\n');
         extra.gates = gateEvidence(this.ctx, p.id, input.commit).map((g) => `- ${g.name}: ${g.status} (\`${g.command}\`)`).join('\n') || '(no gate results)';
         extra.findings = this.store.findings(p.id, { statuses: ['open', 'fixed_claimed'] }).map((f) => `- [${f.severity}] ${f.title}`).join('\n');
+        extra.files = await ws.trackedFiles(ws.integration, input.commit ?? 'HEAD');
         const last = this.ctx.db.get<{ result: string }>("SELECT result FROM audits WHERE project_id=? AND kind='completion' AND status='inconclusive' ORDER BY created_at DESC LIMIT 1", p.id);
         const fb = json<{ feedback?: string[] }>(last?.result, {}).feedback;
         if (fb?.length) extra['Feedback from the previous inconclusive audit'] = fb.map((f) => `- ${f}`).join('\n') + '\nDeclining release now requires citing a specific unsatisfied requirement key or a defect with evidence.';

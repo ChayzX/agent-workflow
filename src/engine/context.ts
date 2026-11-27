@@ -131,15 +131,17 @@ export function buildPrompt(i: PromptInput): BuiltPrompt {
       s.push({ title: 'Task: project-wide integration audit', priority: 0, body: 'Inspect the integrated default branch for integration failures, missing functionality, inconsistencies between components, and technical debt missed by per-task reviews. Report only concrete issues with evidence; each becomes a work item.' });
       s.push({ title: 'Requirements', priority: 1, body: i.extra.requirements ?? '' });
       s.push({ title: 'Recently merged work', priority: 2, body: i.extra.merged ?? '' });
+      if (i.extra.files) s.push({ title: 'Tracked files on the default branch (read them)', priority: 2, body: i.extra.files });
       break;
     case 'completion_audit':
       s.push({ title: 'Task: independent completion audit', priority: 0, body: auditInstructions() });
       s.push({ title: 'Requirements and recorded evidence', priority: 0, body: i.extra.requirements ?? '' });
       s.push({ title: 'Deterministic quality-gate results on the audited commit', priority: 0, body: i.extra.gates ?? '' });
       s.push({ title: 'Open findings', priority: 1, body: i.extra.findings ?? '(none)' });
+      if (i.extra.files) s.push({ title: 'Tracked files at the audited commit (read them)', priority: 1, body: i.extra.files });
       break;
   }
-  const consumed = new Set(['tree', 'remediation', 'diff', 'findings', 'question', 'thread', 'decision', 'decisionKey', 'failures', 'requirements', 'merged', 'gates']);
+  const consumed = new Set(['tree', 'remediation', 'diff', 'findings', 'question', 'thread', 'decision', 'decisionKey', 'failures', 'requirements', 'merged', 'gates', 'files']);
   for (const [k, v] of Object.entries(i.extra)) if (v && !consumed.has(k)) s.push({ title: k, priority: 1, body: v });
   if (i.reconstructed) {
     const cps = store.checkpoints(project.id, task.work_item_id).map((c) => `- [${c.kind}] ${c.summary}`).join('\n');
@@ -202,7 +204,8 @@ function auditInstructions(): string {
     'Mark blocked only when a genuine external blocker is recorded. Otherwise unsatisfied, with the specific gap.',
     'Check documentation accuracy against the implementation, installation reproducibility, and package usability.',
     'Report defects (with severity) that must be fixed before release. Do not recommend release if any mandatory requirement is unsatisfied or any critical/high defect exists.',
-    'You cannot run commands in this audit. The quality-gate results listed below were executed by the supervisor on this exact commit and are first-hand execution evidence; inability to run commands yourself is NOT a reason to decline. Decline only with a concrete unsatisfied requirement key or a defect.',
+    'Your working directory is a checkout of the audited commit. Read the source, tests and documentation yourself (file-reading tools, or read-only shell commands such as ls, cat, rg, git show). Never base a verdict on the summary below alone, and never report a gap as "the record does not show X": open the file and check.',
+    'You do not need to re-run the test suite: the quality-gate results listed below were executed by the supervisor on this exact commit and are first-hand execution evidence. Inability to execute commands is NOT a reason to decline. Decline only with a concrete unsatisfied requirement key or a defect, citing the file and line you inspected.',
   ]);
 }
 

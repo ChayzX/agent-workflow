@@ -64,6 +64,7 @@ export interface SandboxSpec {
   cwd: string;
   writable: string[];          // only these paths are writable
   readOnlyLast?: string[];     // re-bound read-only on top of writable paths (e.g. a worktree's `.git` pointer)
+  readOnly?: string[];         // re-exposed read-only inside hidden paths (e.g. the shared repo.git a worktree points at)
   hide: string[];              // paths replaced by empty tmpfs (credentials, orchestrator home)
   network: boolean;
 }
@@ -88,6 +89,7 @@ export function wrapCommand(cfg: Config, spec: SandboxSpec, command: string): { 
   const tool = [dirname(dirname(process.execPath)), ...(process.env.PATH ?? '').split(':')].filter((p) => p && p.startsWith('/') && existsSync(p) && under(p) && !/\.(codex|claude|ssh|gnupg|config|aws|kube)\b/.test(p));
   for (const t of [...new Set(tool)]) args.push('--ro-bind', t, t);
   if (spec.network) for (const t of trustPaths()) if (under(t)) args.push('--ro-bind', t, t);
+  for (const r of spec.readOnly ?? []) if (existsSync(r)) args.push('--ro-bind', r, r);
   for (const w of spec.writable) args.push('--bind', w, w);
   for (const r of spec.readOnlyLast ?? []) if (existsSync(r)) args.push('--ro-bind', r, r);
   args.push('--chdir', spec.cwd, 'sh', '-c', command);
