@@ -171,6 +171,7 @@ export class TaskQueue {
     const now = this.clock.now();
     const r = this.db.run(
       `UPDATE tasks SET status='queued', lease_owner=NULL, lease_expires_at=NULL, pid=NULL, attempts=MAX(attempts-1,0),
+         provider_pinned = CASE WHEN session_id IS NOT NULL THEN session_provider ELSE provider_pinned END,
          error_class='interrupted', error_message='recovered after supervisor/worker loss', not_before=?, updated_at=?
        WHERE id=? AND status='running' AND lease_owner IS ?`,
       now, now, taskId, expectedOwner,

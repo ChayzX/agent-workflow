@@ -54,6 +54,7 @@ export class SimulatedAdapter implements ProviderAdapter {
         if (req.signal?.aborted) return resolve(true);
         const t = out.hang ? null : setTimeout(() => resolve(false), out.delayMs);
         const to = setTimeout(() => resolve(true), req.timeoutMs);
+        to.unref();
         req.signal?.addEventListener('abort', () => { if (t) clearTimeout(t); clearTimeout(to); resolve(true); }, { once: true });
       });
       if (aborted) {
