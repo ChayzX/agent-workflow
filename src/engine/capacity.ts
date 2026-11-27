@@ -92,6 +92,12 @@ export class CapacityManager {
 
   recordSuccess(provider: ProviderId, rateLimits: RateLimitObservation[] = []): void {
     const s = this.get(provider);
+    // A run can succeed while the provider reports the window is now spent: count the success, keep the limit.
+    if (rateLimits.some((w) => w.status === 'rejected')) {
+      this.db.run('UPDATE provider_state SET successes=?, consecutive_failures=0, updated_at=? WHERE provider=?', s.successes + 1, this.clock.now(), provider);
+      this.observe(provider, rateLimits);
+      return;
+    }
     this.set(provider, {
       status: 'available', reset_at: null, limit_kind: null, reset_source: null, next_probe_at: null, backoff_level: 0,
       consecutive_failures: 0, successes: s.successes + 1,

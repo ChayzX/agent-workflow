@@ -156,6 +156,7 @@ export class ClaudeAdapter implements ProviderAdapter {
         const msg = `${res.subtype}: ${base.text || JSON.stringify(res.errors ?? res.api_error_status ?? '')}`;
         const failure = classifyText(msg, now);
         if (res.subtype === 'error_max_turns') failure.cls = 'task_failure';
+        if (/structured_output/.test(String(res.subtype)) && failure.cls === 'unknown') failure.cls = 'invalid_output';
         if (rejected) Object.assign(failure, { cls: 'usage_limit', resetAt: rejected.resetsAt ?? failure.resetAt, resetSource: rejected.resetsAt ? 'provider' : failure.resetSource, limitKind: rejected.window });
         return { ...base, ok: false, failure };
       }

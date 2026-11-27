@@ -714,7 +714,8 @@ export class Workflow {
     this.ctx.db.run('UPDATE decisions SET adr_path=? WHERE id=?', `docs/adr/${d.key}.md`, d.id);
   }
 
-  private applyPlan(p: ProjectRow, task: TaskRow, out: any): void {
+  /** Apply a validated plan (from a plan task, or an operator-supplied plan file). */
+  applyPlan(p: ProjectRow, task: TaskRow | { agent_id: string | null; input: string; id: string }, out: any): void {
     const errors = validatePlan(out);
     if (errors.length) {
       const attempt = json<{ attempt: number }>(task.input, { attempt: 0 }).attempt + 1;

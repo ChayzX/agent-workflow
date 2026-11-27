@@ -342,7 +342,7 @@ export class Supervisor {
         ctx.clock.now(), task.project_id, task.id, sessionRow, route.provider, result.usage.model ?? route.model, result.usage.inputTokens ?? null, result.usage.outputTokens ?? null,
         result.usage.cachedTokens ?? null, result.usage.costUsd ?? null, `${route.provider}-reported`);
     }
-    ctx.capacity.observe(route.provider, result.rateLimits);
+    if (!result.ok) ctx.capacity.observe(route.provider, result.rateLimits);
     this.workflow.bus.markDelivered(built.deliveredMessageIds);
 
     if (result.ok) {

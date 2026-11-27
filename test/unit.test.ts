@@ -254,3 +254,18 @@ test('sandbox (bubblewrap): gate commands cannot read credentials, write outside
   assert.notEqual(net.exitCode, 0, 'no network');
   rmSync(d, { recursive: true, force: true });
 });
+
+test('capacity: success that reports a rejected window keeps the provider exhausted (no flap); stale reset clamps to ≥1 min', async () => {
+  const { CapacityManager } = await import('../src/engine/capacity.js');
+  const db = new Db(':memory:');
+  const clock = new ManualClock(Date.UTC(2026, 10, 27, 5, 10, 13));
+  const cap = new CapacityManager(db, clock, defaultConfig('/tmp/x'), new EventLog(db, clock));
+  cap.recordSuccess('claude', [{ window: 'five_hour', status: 'rejected', resetsAt: Date.UTC(2026, 10, 27, 5, 10, 0) }]);
+  const s = cap.get('claude');
+  assert.equal(s.status, 'exhausted');
+  assert.equal(s.reset_at, clock.now() + 60_000, 'reset in the past is clamped to now + 1 min');
+  assert.equal(db.get<{ n: number }>("SELECT COUNT(*) AS n FROM events WHERE type='provider.status'")!.n, 1, 'single transition, no flap');
+  clock.advance(61_000);
+  await cap.tick(new Map());
+  db.close();
+});
