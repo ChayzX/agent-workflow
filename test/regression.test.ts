@@ -459,3 +459,109 @@ test('live finding (run 2): operator cancel descopes a vague item; the project s
     assert.ok(h.ctx.db.get("SELECT 1 FROM audit_log WHERE action='workitem.descoped'"));
   } finally { h.cleanup(); }
 });
+
+test('PR #61 review #1: unblock re-runs dependency resolution (a dependent never starts while its dependency is blocked)', async () => {
+  const h = makeHarness(demoBehaviour());
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    const wf = h.sup.workflow;
+    let phase = 0; let violated = false; let reblocked = false;
+    const p = await drive(h, (x) => done(x.status), p0.id, { maxTicks: 1200, onTick: () => {
+      const w1 = wf.store.workItemByKey(p0.id, 'W-001'); const w2 = wf.store.workItemByKey(p0.id, 'W-002');
+      if (!w1 || !w2) return;
+      if (w1.status === 'blocked' && ['implementing', 'gating', 'in_review'].includes(w2.status)) violated = true;
+      if (phase === 0 && ['ready', 'implementing'].includes(w1.status) && w2.status === 'backlog') {
+        h.ctx.db.run("UPDATE work_items SET status='blocked' WHERE id=?", w1.id); h.ctx.queue.cancelForWorkItem(w1.id, 'test block'); phase = 1;
+      } else if (phase === 1 && w2.status === 'blocked') {
+        issueCommand(h.ctx, 'unblock_item', p0.id, { key: 'W-002', note: 'try again' }, 'operator'); phase = 2;
+      } else if (phase === 2 && w2.status === 'blocked' && wf.store.checkpointsOfKind(p0.id, w2.id, 'operator_unblock').length === 1) {
+        reblocked = true;
+        issueCommand(h.ctx, 'unblock_item', p0.id, { key: 'W-001', note: 'dependency fixed' }, 'operator'); phase = 3;
+      } else if (phase === 3 && w1.status !== 'blocked') {
+        // W-002 and W-003 both depend on W-001; the resolver blocked both. Unblock every dependent.
+        for (const w of wf.store.workItems(p0.id).filter((x) => x.status === 'blocked')) issueCommand(h.ctx, 'unblock_item', p0.id, { key: w.key, note: 'dependency is back' }, 'operator');
+        phase = 4;
+      }
+    } });
+    assert.ok(reblocked, `dependent was re-blocked by the resolver after unblock (phase ${phase})`);
+    assert.equal(violated, false, 'dependent never started while its dependency was blocked');
+    assert.equal(p.status, 'completed', p.status_reason ?? '');
+  } finally { h.cleanup(); }
+});
+
+test('PR #61 review #2/#5/#7: cancel refused once integration starts; block never revives a cancelled item; limits restart after unblock', async () => {
+  const h = makeHarness(demoBehaviour());
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    const p = await drive(h, (x) => done(x.status), p0.id, { maxTicks: 900 });
+    assert.equal(p.status, 'completed', p.status_reason ?? '');
+    const wf = h.sup.workflow; const proj = wf.store.project(p0.id)!;
+    assert.match(wf.cancelItem(proj, 'W-001', 'x', 'operator'), /not cancelled/);
+    for (const st of ['merge_ready', 'merging', 'merged']) {
+      h.ctx.db.run('UPDATE work_items SET status=? WHERE key=? AND project_id=?', st, 'W-002', p0.id);
+      assert.match(wf.cancelItem(proj, 'W-002', 'x', 'operator'), /integration started or finished/, st);
+    }
+    // block() on a cancelled item is a no-op (late results cannot revive descoped work).
+    h.ctx.db.run("UPDATE work_items SET status='remediation' WHERE key='W-003' AND project_id=?", p0.id);
+    assert.equal(wf.cancelItem(proj, 'W-003', 'descoped', 'operator'), 'ok');
+    (wf as any).block(proj, wf.store.workItemByKey(p0.id, 'W-003')!, 'late failure');
+    assert.equal(wf.store.workItemByKey(p0.id, 'W-003')!.status, 'cancelled');
+    // Investigation limit counts only since the last operator unblock.
+    h.ctx.db.run("UPDATE work_items SET status='remediation' WHERE key='W-002' AND project_id=?", p0.id);
+    const w2 = wf.store.workItemByKey(p0.id, 'W-002')!;
+    for (let i = 0; i < 3; i++) {
+      const { task } = h.ctx.queue.enqueue({ projectId: p0.id, kind: 'investigate', role: 'engineering_director', workItemId: w2.id, idempotencyKey: `test-inv-${i}`, input: {}, readOnly: true } as any);
+      h.ctx.db.run("UPDATE tasks SET status='succeeded', processed=1 WHERE id=?", task.id);
+    }
+    h.clock.advance(1000);
+    (wf as any).requestInvestigation(proj, w2, 'still failing');
+    assert.equal(wf.store.workItemByKey(p0.id, 'W-002')!.status, 'blocked', 'limit reached → blocked');
+    h.clock.advance(1000);
+    assert.equal(wf.unblock(proj, 'W-002', 'operator looked at it', 'operator'), 'ok');
+    h.ctx.db.run("UPDATE work_items SET status='remediation' WHERE id=?", w2.id);
+    h.clock.advance(1000);
+    (wf as any).requestInvestigation(proj, wf.store.workItemByKey(p0.id, 'W-002')!, 'new failure');
+    assert.notEqual(wf.store.workItemByKey(p0.id, 'W-002')!.status, 'blocked', 'counter restarted after unblock');
+    assert.ok(h.ctx.db.get("SELECT 1 FROM tasks WHERE work_item_id=? AND kind='investigate' AND status='queued'", w2.id), 'a new investigation was queued');
+  } finally { h.cleanup(); }
+});
+
+test('PR #61 review #8: release recommended but docs/install marked false without a defect is inconclusive, not a pass', async () => {
+  const base = demoBehaviour();
+  let n = 0;
+  const h = makeHarness((req, c) => {
+    if (req.meta.taskKind === 'completion_audit' && n < 1) {
+      n++;
+      return { structured: { summary: 'looks fine', docs_accurate: false, install_reproducible: true, release_recommended: true, defects: [],
+        requirements: ['R-001', 'R-002', 'R-003'].map((key) => ({ key, status: 'satisfied', evidence: 'src/calc.js:1', gap: '' })) } };
+    }
+    return base(req, c);
+  });
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    const p = await drive(h, (x) => done(x.status), p0.id, { maxTicks: 900 });
+    assert.equal(p.status, 'completed', p.status_reason ?? '');
+    const audits = h.ctx.db.all<{ status: string; result: string }>("SELECT status, result FROM audits WHERE kind='completion' ORDER BY created_at");
+    assert.equal(audits[0]!.status, 'inconclusive');
+    assert.match(audits[0]!.result, /without a concrete defect/);
+    assert.equal(h.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM work_items WHERE type='defect'")!.n, 0);
+  } finally { h.cleanup(); }
+});
+
+test('PR #61 review #9: runGates passes the shared repository to the gate sandbox (git works in gates)', async (t) => {
+  const { findBwrap } = await import('../src/security/sandbox.js');
+  if (!findBwrap()) { t.diagnostic('bubblewrap unavailable; skipped'); return; }
+  const { runGates } = await import('../src/engine/gates.js');
+  const h = makeHarness(demoBehaviour(), (c) => { c.security.sandbox = 'bwrap'; });
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    const ws = h.sup.workflow.ws(p0);
+    await ws.ensure(null);
+    const head = await ws.head();
+    const gates = [{ name: 'git', command: 'git rev-parse HEAD', required: true, kind: 'test' }] as any;
+    const without = await runGates(h.ctx, { projectId: p0.id, workItemId: null, scope: 'test', cwd: ws.integration, commit: head, gates });
+    const withGit = await runGates(h.ctx, { projectId: p0.id, workItemId: null, scope: 'test', cwd: ws.integration, commit: head, gates, gitDir: ws.bare });
+    assert.equal(without.passed, false, 'without gitDir the worktree pointer dangles');
+    assert.equal(withGit.passed, true, 'with gitDir git works read-only');
+  } finally { h.cleanup(); }
+});

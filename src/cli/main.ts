@@ -446,7 +446,7 @@ async function runDaemon(flags: Flags): Promise<number> {
 async function selfPackage(flags: Flags): Promise<number> {
   const outDir = resolve(String(flags.out ?? join(ROOT, 'releases')));
   const name = `agent-workflow-orchestrator-${VERSION}`;
-  const skip = (rel: string) => /^(node_modules|\.git|releases|\.orchestrator|tmp)(\/|$)/.test(rel) || /(^|\/)\.(env|DS_Store)$/.test(rel) || rel.endsWith('.db') || rel.endsWith('.log');
+  const skip = (rel: string) => /^(node_modules|\.git|releases?|\.orchestrator|tmp)(\/|$)/.test(rel) || /(^|\/)\.(env|DS_Store)$/.test(rel) || rel.endsWith('.db') || rel.endsWith('.log');
   const entries = collectDir(ROOT, name, skip);
   const manifest = { name: 'agent-workflow-orchestrator', version: VERSION, built_at: new Date().toISOString(), node: '>=22.13', runtime_dependencies: 0, files: entries.map((e) => ({ path: e.name.slice(name.length + 1), sha256: sha256(e.data), bytes: e.data.length })) };
   entries.push({ name: `${name}/RELEASE-MANIFEST.json`, data: Buffer.from(JSON.stringify(manifest, null, 2)) });

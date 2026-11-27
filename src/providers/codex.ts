@@ -83,7 +83,10 @@ export class CodexAdapter implements ProviderAdapter {
     if (!this.cfg.allowApiKeyBilling) {
       if (!this.authCache || this.clock.now() - this.authCache.at > 10 * 60_000) {
         const a = await this.checkAuth().catch(() => null);
-        if (a) this.authCache = { at: this.clock.now(), apiKey: !!a.apiKeyBilling };
+        // Fail closed: if the login mode cannot be determined, do not risk running on API-key billing.
+        if (!a) return { ok: false, sessionId: null, structured: null, text: '', rateLimits: [], exitCode: null, durationMs: 0,
+          failure: { cls: 'auth', message: 'could not determine the Codex login mode (billing guard); run `codex login status`' } };
+        this.authCache = { at: this.clock.now(), apiKey: !!a.apiKeyBilling };
       }
       if (this.authCache?.apiKey) {
         return { ok: false, sessionId: null, structured: null, text: '', rateLimits: [], exitCode: null, durationMs: 0,

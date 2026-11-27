@@ -188,18 +188,26 @@ export class Workflow {
   }
 
   private block(p: ProjectRow, w: WorkItemRow, reason: string): void {
-    if (!this.store.transition(w.id, [w.status], 'blocked', {}, reason)) return;
+    const cur = this.store.workItem(w.id);
+    if (!cur || ['done', 'merged', 'cancelled'].includes(cur.status)) return; // never revive a finished or descoped item
+    if (!this.store.transition(w.id, [cur.status], 'blocked', {}, reason)) return;
     this.ctx.queue.cancelForWorkItem(w.id, `blocked: ${reason}`);
     for (const rk of json<string[]>(w.requirement_keys, [])) this.store.setRequirementStatus(p.id, rk, 'blocked', [{ blocker: w.key, reason }], `${w.key}: ${reason}`);
     this.ctx.events.emit('workitem.blocked', `${w.key} blocked: ${reason}`, { projectId: p.id, level: 'warn' });
   }
 
-  /** Operator override: return a blocked item to `ready` with a recorded note. Investigation limits restart from here. */
+  /**
+   * Operator override for a blocked item, with a recorded note. A reviewed and gated commit returns to `merge_ready`
+   * (the merge re-verifies the merged tree); anything else returns to `backlog`, so dependency resolution runs again
+   * before work restarts. Investigation, remediation and merge-retry limits restart from here.
+   */
   unblock(p: ProjectRow, key: string, note: string, by: string): string {
     const w = this.store.workItemByKey(p.id, key);
     if (!w) return `no work item ${key}`;
     if (w.status !== 'blocked') return `${key} is ${w.status}, not blocked`;
-    if (!this.store.transition(w.id, ['blocked'], 'ready', { remediation_rounds: 0 }, `unblocked by ${by}: ${note}`.slice(0, 500))) return 'state changed concurrently; retry';
+    const verified = !!w.head_commit && w.reviewed_commit === w.head_commit && w.gated_commit === w.head_commit;
+    const target = verified ? 'merge_ready' : 'backlog';
+    if (!this.store.transition(w.id, ['blocked'], target, { remediation_rounds: 0 }, `unblocked by ${by}: ${note}`.slice(0, 500))) return 'state changed concurrently; retry';
     for (const rk of json<string[]>(w.requirement_keys, [])) if (this.store.requirement(p.id, rk)?.status === 'blocked') this.store.setRequirementStatus(p.id, rk, 'open', [{ unblocked: w.key, by }], null);
     this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'operator_unblock', summary: `Operator guidance: ${note}` });
     this.ctx.events.audit(by, 'workitem.unblock', { projectId: p.id, target: w.key, detail: { note } });
@@ -212,7 +220,8 @@ export class Workflow {
   cancelItem(p: ProjectRow, key: string, note: string, by: string): string {
     const w = this.store.workItemByKey(p.id, key);
     if (!w) return `no work item ${key}`;
-    if (['done', 'cancelled', 'merging'].includes(w.status)) return `${key} is ${w.status}; not cancelled`;
+    // Once integration has started the work may already be on the default branch: descoping it then would be a lie.
+    if (['done', 'cancelled', 'merge_ready', 'merging', 'merged'].includes(w.status)) return `${key} is ${w.status}; not cancelled (integration started or finished)`;
     if (!this.store.transition(w.id, [w.status], 'cancelled', {}, `cancelled by ${by}: ${note}`.slice(0, 500))) return 'state changed concurrently; retry';
     this.ctx.queue.cancelForWorkItem(w.id, `cancelled by ${by}`);
     for (const rk of json<string[]>(w.requirement_keys, [])) if (this.store.requirement(p.id, rk)?.status === 'blocked') this.store.setRequirementStatus(p.id, rk, 'open', [{ cancelled: w.key, by }], null);
@@ -269,8 +278,9 @@ export class Workflow {
   }
 
   /** Monotonic per-item counter (number of times the item entered a phase) used to version task keys. */
-  private epoch(w: WorkItemRow, kind: string): number {
-    return this.ctx.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM checkpoints WHERE work_item_id=? AND kind=?', w.id, kind)!.n;
+  private epoch(w: WorkItemRow, kind: string, sinceUnblock = false): number {
+    const since = sinceUnblock ? " AND created_at > COALESCE((SELECT MAX(created_at) FROM checkpoints WHERE work_item_id=? AND kind='operator_unblock'), 0)" : '';
+    return this.ctx.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM checkpoints WHERE work_item_id=? AND kind=?${since}`, ...(sinceUnblock ? [w.id, kind, w.id] : [w.id, kind]))!.n;
   }
 
   /**
@@ -463,7 +473,7 @@ export class Workflow {
           if (appr?.status === 'approved') {
             // The operator approved here, but GitHub still demands a review: the orchestrator never impersonates one.
             this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'merge_rejected_after_approval', summary: r.reason });
-            if (this.epoch(w, 'merge_rejected_after_approval') >= 3) this.block(p, w, `PR #${w.pr_number} still requires a GitHub review after operator approval: review it on GitHub, then resume the project`);
+            if (this.epoch(w, 'merge_rejected_after_approval', true) >= 3) this.block(p, w, `PR #${w.pr_number} still requires a GitHub review after operator approval: review it on GitHub, then run \`orchestrator unblock ${w.key} --note "reviewed on GitHub"\` to retry the merge`);
             return;
           }
           this.ctx.policy.request('human_review_required', `PR #${w.pr_number} (${w.key}) requires a human review per repository rules: ${r.reason}. Review and approve the PR on GitHub first (the orchestrator never impersonates reviewers), then approve here to let the merge proceed.`, { projectId: p.id, requestedBy: 'supervisor', dedup: approvalKey, payload: { pr: w.pr_number } });
@@ -596,6 +606,7 @@ export class Workflow {
   }
 
   private requestInvestigation(p: ProjectRow, w: WorkItemRow, why: string): void {
+    if (['done', 'merged', 'cancelled', 'blocked'].includes(this.store.workItem(w.id)?.status ?? 'cancelled')) return;
     if (this.investigationActive(w)) return; // single-flight
     const n = this.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE work_item_id=? AND kind='investigate' AND status IN ('succeeded','dead') AND created_at > COALESCE((SELECT MAX(created_at) FROM checkpoints WHERE work_item_id=? AND kind='operator_unblock'), 0)", w.id, w.id)!.n;
     if (n >= 3) { this.block(p, w, `repeated failures after ${n} investigations: ${why}`); return; }
@@ -667,14 +678,14 @@ export class Workflow {
       // Boolean verdicts are summaries of the auditor's own defects: they never create work items themselves. A false
       // verdict with no concrete defect is an unsupported decline (re-audited with feedback; see below).
       const concrete = (o.defects ?? []).some((d: any) => SEVERITY_RANK[d.severity as Severity] >= SEVERITY_RANK.medium);
-      if ((o.docs_accurate === false || o.install_reproducible === false) && !concrete && o.release_recommended) problems.push(`${t.provider} auditor does not recommend release`);
+      if ((o.docs_accurate === false || o.install_reproducible === false) && !concrete) problems.push(`${t.provider} auditor reported inaccurate docs or non-reproducible install without a concrete defect`);
     }
     for (const r of reqs.filter((x) => x.mandatory)) {
       const covered = (o: TaskRow) => (json<any>(o.output, {}).requirements ?? []).some((x: any) => x.key === r.key);
       if (succeeded.some((t) => !covered(t)) && r.status !== 'blocked') gaps.set(r.key, `${gaps.get(r.key) ?? ''} auditor omitted requirement`.trim());
     }
     const declines = succeeded.filter((t) => { const o = json<any>(t.output, {}); return !o.release_recommended || o.docs_accurate === false || o.install_reproducible === false; });
-    const onlyDeclines = !gaps.size && !defects.length && problems.length > 0 && problems.every((x) => x.endsWith('does not recommend release') || x.startsWith('independent auditor(s) failed'));
+    const onlyDeclines = !gaps.size && !defects.length && problems.length > 0 && problems.every((x) => x.endsWith('does not recommend release') || x.endsWith('without a concrete defect') || x.startsWith('independent auditor(s) failed'));
     if (onlyDeclines) {
       // A decline without a concrete unsatisfied requirement or defect is not actionable: re-audit with feedback, then escalate.
       const prev = this.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM audits WHERE project_id=? AND kind='completion' AND status='inconclusive' AND created_at > COALESCE((SELECT MAX(created_at) FROM audits WHERE project_id=? AND kind='completion' AND status IN ('failed','passed')), 0)", p.id, p.id)!.n;
@@ -1024,7 +1035,7 @@ export class Workflow {
         extra.files = await ws.trackedFiles(ws.integration, input.commit ?? 'HEAD');
         const last = this.ctx.db.get<{ result: string }>("SELECT result FROM audits WHERE project_id=? AND kind='completion' AND status='inconclusive' ORDER BY created_at DESC LIMIT 1", p.id);
         const fb = json<{ feedback?: string[] }>(last?.result, {}).feedback;
-        if (fb?.length) extra['Feedback from the previous inconclusive audit'] = fb.map((f) => `- ${f}`).join('\n') + '\nDeclining release now requires citing a specific unsatisfied requirement key or a defect with evidence.';
+        if (fb?.length) extra['Feedback from the previous inconclusive audit'] = fb.map((f) => `- ${f}`).join('\n') + '\nDeclining release now requires citing a specific unsatisfied requirement key or a defect with evidence. A docs_accurate or install_reproducible value of false must be backed by a concrete defect (file, line, observed behaviour) in the defects array.';
         break;
       }
       default:

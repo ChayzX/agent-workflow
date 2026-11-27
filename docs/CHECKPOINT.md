@@ -3,22 +3,24 @@
 This file is the durable hand-off for the session building this platform. Update it at each
 milestone boundary. Scheduled auto-resume reads "Next executable actions".
 
-## Current milestone (updated 2026-11-27 11:30 UTC)
-- PR #1 merged (a7673a9). Follow-ups on branch claude/autonomous-engineering-orchestrator-ocqm2i:
-  da2b85f (blocked-claim override), 4905b9b (gate git access, auditor file reading, vague audit defects). `npm test` 48/48.
-- Live dual-provider run 2 (`<scratchpad>/orch-live3`) verified: Claude→Codex and Codex→Claude Q&A, cross-provider
-  reviews in both directions, debate ADR-001 (Codex proposed, Claude evaluated/decided), concurrent implementation by
-  both providers, live crash recovery (harness killed 11:20; `orchestrator run` resumed both sessions natively).
-  Its first completion audit failed for a prompt bug (fixed in 4905b9b); resumed on the fixed build at 11:21.
-- Issues needing the operator are labelled `needs-operator` with exact requirements: #29-32, #46 (PAT),
-  #45, #48 (fresh VM), #49, #53 (systemd host), #52 (HawkScan), #54 (OCI).
+## Current milestone (updated 2026-11-27 16:10 UTC)
+- Live dual-provider run 2 COMPLETED (verified greet 0.1.0; evidence docs/evidence/greet-dual-provider/SUMMARY.md),
+  on four successive builds and with two operator actions (unblock D-007, cancel D-008).
+- PR #61 (this branch → main) opened. The independent review returned REQUEST_CHANGES: 3 blocking, 7 non-blocking
+  findings. All were addressed in the follow-up commit:
+  - unblock → backlog (dependency re-resolution) or merge_ready when the head is reviewed and gated;
+  - cancel refused from merge_ready, merging and merged; cancel aborts running tasks; block and investigation never
+    revive terminal items;
+  - guidance is queried by kind; the merge-retry bound restarts after an unblock;
+  - audit wording and feedback fixed; the Codex billing guard fails closed;
+  - SUMMARY.md states the builds and the operator rescue.
+- `npm test` 56/56. The release ZIP was rebuilt from the fixed code (release/).
 - Remaining:
-  1. Let run 2 finish (watch with `ORCH_HOME=<scratchpad>/orch-live3 ./bin/orchestrator status`; resume with
-     `ORCH_HOME=... ./bin/orchestrator run --no-dashboard` if the supervisor is not running). Copy evidence to
-     docs/evidence/greet-dual-provider/ (`git add -f` for logs) and update ⏳ rows in docs/acceptance-matrix.md.
-  2. Self-package ZIP + .sha256 under release/; send to the user.
-  3. Open PR #2, independent review subagent, merge only on APPROVE; then close #17, #19, #36, #37, #56, #57 with evidence.
-  4. Delete the hourly "Resume orchestrator build" task (trig_017TYriJi3K7RCRCucUNw7M5) and report.
+  1. Re-review of PR #61 by the same reviewer subagent. Merge only on APPROVE.
+  2. After the merge, close #17, #19, #36, #37, #56 and #57 with evidence; close epics whose sub-issues are all closed.
+  3. Delete the hourly "Resume orchestrator build" task (trig_017TYriJi3K7RCRCucUNw7M5) and report.
+  4. Operator-only items are labelled `needs-operator`; the run book is docs/operator-verification-prompt.md.
+  5. Follow-up: a clean live run on one build, to measure cost without the meta-work loops.
 
 ## Verified facts (live evidence, 2026-11-27)
 - Claude Code CLI 2.1.332, subscription OAuth (`apiKeySource: "none"`). `claude -p --output-format stream-json`

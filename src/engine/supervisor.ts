@@ -331,7 +331,12 @@ export class Supervisor {
             break;
           }
           case 'cancel_item':
-            if (p) result = this.workflow.cancelItem(p, String(args.key), String(args.note ?? ''), c.issued_by);
+            if (p) {
+              result = this.workflow.cancelItem(p, String(args.key), String(args.note ?? ''), c.issued_by);
+              const w = result === 'ok' ? this.workflow.store.workItemByKey(p.id, String(args.key)) : undefined;
+              // Running tasks are fenced (cancelled first, so their late results are ignored), then interrupted.
+              if (w) for (const [tid, r] of this.running) if (this.ctx.queue.get(tid)?.work_item_id === w.id) { this.ctx.queue.cancel(tid, `work item cancelled by ${c.issued_by}`); r.ac.abort(); }
+            }
             break;
           case 'unblock_item':
             if (p) result = this.workflow.unblock(p, String(args.key), String(args.note ?? ''), c.issued_by);
