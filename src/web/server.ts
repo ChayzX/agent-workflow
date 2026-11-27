@@ -33,6 +33,8 @@ export class Dashboard {
     const host = this.o.host ?? this.ctx.cfg.dashboard.host;
     const port = this.o.port ?? this.ctx.cfg.dashboard.port;
     this.server = createServer((req, res) => this.handle(req, res).catch((e) => {
+      const status = (e as { status?: number }).status;
+      if (status && status >= 400 && status < 500) { if (!res.headersSent) this.send(res, status, { error: (e as Error).message }, { Connection: 'close' }); req.destroy(); return; }
       this.ctx.log.error('dashboard error', { error: (e as Error).message });
       if (!res.headersSent) this.send(res, 500, { error: 'internal error' });
     }));
@@ -81,7 +83,8 @@ export class Dashboard {
     const url = new URL(req.url ?? '/', 'http://localhost');
     const path = url.pathname;
     const method = req.method ?? 'GET';
-    if (path === '/healthz') return this.send(res, 200, { ok: true, db: this.ctx.db.integrityCheck() === 'ok' });
+    // Unauthenticated liveness probe: constant-time (no integrity scan), no internal details.
+    if (path === '/healthz') { let db = false; try { db = !!this.ctx.db.get('SELECT 1 AS ok'); } catch { /* down */ } return this.send(res, db ? 200 : 503, { ok: db }); }
     if (method === 'GET' && !path.startsWith('/api/')) return this.static(res, path);
 
     if (path === '/api/login' && method === 'POST') {

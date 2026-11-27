@@ -817,6 +817,8 @@ export class Workflow {
       case 'review': case 'security_review': {
         const d = await ws.diff(cwd, p.default_branch, w!.head_commit ?? 'HEAD', this.ctx.cfg.limits.maxDiffChars);
         extra.diff = '```diff\n' + d.text + '\n```';
+        extra['Quality gates already run by the supervisor on this exact commit (you cannot run commands; do not re-request them)'] =
+          gateEvidence(this.ctx, p.id, w!.head_commit ?? '').map((g) => `- ${g.name}: ${g.status} (\`${g.command}\`, exit ${g.exit_code})`).join('\n') || '(none recorded)';
         break;
       }
       case 'verify_fix': {
