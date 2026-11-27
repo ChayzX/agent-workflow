@@ -717,7 +717,18 @@ export class Workflow {
         if (!w) return;
         this.postOutbound(task, out.messages);
         const transfer = (out.messages ?? []).find((m: any) => m.type === 'transfer');
-        if (out.status === 'blocked') { this.requestInvestigation(p, w, `agent reported blocked: ${String(out.notes).slice(0, 500)}`); return; }
+        if (out.status === 'blocked') {
+          // "Blocked" is a claim. If the worktree holds changes (or an in-progress merge the agent cannot finish
+          // because git is read-only for it), deterministic gates and independent review decide instead.
+          const ws0 = this.ws(p);
+          const dir0 = ws0.wtPath(w.key);
+          const mergeInProgress = existsSync(join(ws0.bare, 'worktrees', w.key, 'MERGE_HEAD'));
+          if (!(mergeInProgress || (await ws0.isDirty(dir0).catch(() => false)))) {
+            this.requestInvestigation(p, w, `agent reported blocked: ${String(out.notes).slice(0, 500)}`);
+            return;
+          }
+          this.store.checkpoint({ projectId: p.id, workItemId: w.id, taskId: task.id, kind: 'blocked_claim_overridden', summary: `agent said blocked but left changes${mergeInProgress ? ' (merge in progress)' : ''}; verifying with gates and review: ${String(out.notes).slice(0, 300)}` });
+        }
         if (transfer && task.kind === 'implement') {
           const history = json<string[]>(json<any>(task.input, {}).transfers ?? '[]', []);
           const toRole = String(transfer.to_role).toLowerCase();

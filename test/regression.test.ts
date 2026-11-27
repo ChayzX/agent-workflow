@@ -319,3 +319,24 @@ test('fourth-pass S1: a PR awaiting human review does not starve other merges; a
     assert.equal(calls.length, 0, 'denied review never retried against GitHub');
   } finally { await h.sup.workflow.drainJobs(); h.cleanup(); }
 });
+
+test('live finding: an agent "blocked" claim with real changes goes to gates/review instead of investigation', async () => {
+  const base = demoBehaviour();
+  let claimed = false;
+  const h = makeHarness((req, c) => {
+    if (req.meta.taskKind === 'remediate' && req.meta.workItemKey === 'W-001' && !claimed) {
+      claimed = true;
+      writeFileSync(join(req.cwd, 'src/calc.js'), 'export function add(a, b) {\n  return a + b;\n}\n');
+      return { structured: { status: 'blocked', summary: 'fixed but cannot stage (git read-only)', files_changed: ['src/calc.js'], tests_added: [], addressed_finding_ids: [], root_cause: 'x', notes: 'supervisor must stage', messages: [] } };
+    }
+    return base(req, c);
+  });
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    const p = await drive(h, (x) => done(x.status), p0.id, { maxTicks: 600 });
+    assert.equal(p.status, 'completed', p.status_reason ?? '');
+    assert.ok(claimed);
+    const inv = h.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks t JOIN work_items w ON w.id=t.work_item_id WHERE w.key='W-001' AND t.kind='investigate'")!.n;
+    assert.equal(inv, 0, 'no investigation for a blocked claim that left a real fix');
+  } finally { h.cleanup(); }
+});
