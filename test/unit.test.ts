@@ -287,3 +287,15 @@ test('codex billing guard: API-key login is refused at execution time unless bil
   assert.notEqual(r2.failure?.cls, 'billing_policy', 'authorized billing proceeds');
   rmSync(d, { recursive: true, force: true });
 });
+
+test('a killed provider run reports the signal, not the opaque event stream', async () => {
+  const d = tmp();
+  const bin = fakeCli(d, 'claude', `cat >/dev/null; echo '{"type":"system","subtype":"init","session_id":"s1","apiKeySource":"none"}'; echo '{"type":"assistant","signature":"FllKi8a3jEjWwIl8PJ0IgwI7fNnpxnYl8xxNGRaj"}'; kill -TERM $$`);
+  const cfg = defaultConfig(d);
+  const a = new ClaudeAdapter({ ...cfg.providers.claude!, command: bin }, new ManualClock(), {});
+  const r = await a.execute({ prompt: 'x', cwd: d, mode: 'read-only', timeoutMs: 10000, env: { PATH: process.env.PATH! }, meta: { taskId: 't', taskKind: 'answer', role: 'x', projectId: 'p', attempt: 1 } });
+  assert.equal(r.failure?.cls, 'killed');
+  assert.match(r.failure!.message, /^terminated by SIGTERM/);
+  assert.doesNotMatch(r.failure!.message, /FllKi8a/);
+  rmSync(d, { recursive: true, force: true });
+});

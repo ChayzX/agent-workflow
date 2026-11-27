@@ -7,7 +7,7 @@ How to read the Status column:
 - **⏳ pending:** a live run is scheduled or needs operator credentials. The procedure is in `docs/live-acceptance.md`.
 - **❌:** not done.
 
-Automated suite: `npm test` passes 48 of 48 (`test/unit`, `github`, `web`, `e2e`, `recovery`, `regression`).
+Automated suite: `npm test` passes 52 of 52 (`test/unit`, `github`, `web`, `e2e`, `recovery`, `regression`).
 
 Live evidence on 2026-11-27 comes from the wordfreq run: a single goal, real Claude agents, with Codex exhausted for its
 whole duration. The redacted timeline is in `docs/evidence/wordfreq-live/events.log`. The verified product ZIP and its
@@ -65,6 +65,7 @@ whole duration. The redacted timeline is in `docs/evidence/wordfreq-live/events.
 | Failed audits reopen development | **Live:** project went back to `active`, defects were implemented, reviewed, merged, and re-audited | ✅ live |
 | Remediated requirements independently verified | **Live:** round 4 passed with 2 auditors on commit 5927b11b. Requirements are marked verified only by the audit. | ✅ live |
 | Release ZIP generated automatically | **Live:** `wordfreq-0.1.0.zip`, sha256 `a50a35e5608a75fd…`: manifest, SBOM, test evidence, security assessment, requirements matrix, release notes, limitations, rollback, original goal | ✅ live |
+| Dual-provider completion audit and release | **Live run 2:** audit rounds 1 and 2 used Claude + Codex. Round 2 found a concrete CRLF install defect, which was fixed. Round 3 passed with Claude + Claude, because Codex was exhausted (recorded failover); in round 3 an auditor ran `node --test` itself. Release `greet-0.1.0.zip`, sha256 `02993441…`, independently re-verified (11 pass, 0 fail, 5 git-dependent skips). | ✅ live |
 | Package integrity and secret exclusion verified | Orchestrator: per-file checksums after clean extraction plus a re-scan. Independent re-check: `sha256sum -c` OK; `npm ci && npm test` → 97/97 in a clean directory; CLI behaviour spot-checked (`--json`, exit 2, stdin, ties). | ✅ live |
 | Clean-environment installation succeeds | As above (release `verify_commands` run inside bubblewrap) | ✅ live |
 | Package accessible to the operator | `orchestrator release`, the dashboard download link, and `docs/evidence/wordfreq-live/` | ✅ live |

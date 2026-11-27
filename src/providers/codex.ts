@@ -150,7 +150,7 @@ export class CodexAdapter implements ProviderAdapter {
         const failure = classifyText(msg, now);
         const mapped = classifyCodexErrorInfo(errorInfo);
         if (mapped) failure.cls = mapped;
-        if (failure.cls === 'unknown' && run.signal) failure.cls = 'killed';
+        if (failure.cls === 'unknown' && run.signal) { failure.cls = 'killed'; failure.message = `terminated by ${run.signal}${run.stderr.trim() ? `: ${run.stderr.trim().slice(-300)}` : ''}`; }
         if (failure.cls === 'usage_limit') base.rateLimits.push({ window: failure.limitKind ?? 'unknown', status: 'rejected', resetsAt: failure.resetAt ?? null });
         return { ...base, ok: false, failure };
       }

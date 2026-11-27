@@ -144,7 +144,7 @@ orchestrator doctor
 ## Status
 
 **v0.1.0.** The build was merged after five rounds of independent agent code review, which found 24 defects, all fixed
-with regression tests. `npm test` passes 48 of 48.
+with regression tests. `npm test` passes 52 of 52.
 
 - **Verified live:**
   - A complete product, `wordfreq`, built autonomously from one goal by real Claude agents. Verified release:
@@ -153,9 +153,16 @@ with regression tests. `npm test` passes 48 of 48.
   - Real Claude limit exhaustion with both providers out, followed by staggered recovery.
   - Graceful restart.
   - Confined agent sandbox.
-- **Verified with simulated providers:** cross-provider failover, crash and kill recovery, duplicate prevention,
-  debates, defect remediation.
-- **Pending live verification:** dual-provider collaboration (scheduled), GitHub mode against the live API (needs an
-  operator PAT), systemd on a real host, HAWK DAST, OCI deployment.
+  - Dual-provider collaboration on `greet` (`docs/evidence/greet-dual-provider/`):
+    - Codex and Claude asked each other questions in both directions.
+    - Each reviewed the other's code, and they debated a design decision into an ADR.
+    - They ran concurrently.
+    - When Codex hit a real usage limit, the work failed over to Claude.
+    - The run recovered from a crash, and operator unblock/cancel commands were used.
+    - The result was a verified release.
+- **Verified with simulated providers:** duplicate prevention, plus the GitHub sync against a fake GitHub.
+- **Pending (needs the operator; issues labelled `needs-operator`):** GitHub mode against the live API (needs a PAT),
+  a fresh-VM install, systemd on a real host, HawkScan DAST, OCI deployment. The run book for a local agent with server
+  access is `docs/operator-verification-prompt.md`.
 
 Details: `docs/acceptance-matrix.md`.
