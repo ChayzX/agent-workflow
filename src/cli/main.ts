@@ -122,7 +122,16 @@ async function main(): Promise<number> {
           for (const [id, a] of ctx.adapters) {
             const d = await a.detect();
             const au = d.installed ? await a.checkAuth() : { ok: false, detail: d.error };
-            out(`  ${id}: ${d.installed ? d.version : 'not installed'}; auth: ${au.ok ? 'ok' : 'NOT OK'} (${au.detail ?? ''})${au.apiKeyBilling ? ' — API-key billing (refused unless authorized)' : ''}`);
+            let hint = '';
+            if (d.installed && !au.ok) {
+              // Distinguish "not logged in" from "logged in, but the login is outside the agent sandbox's view".
+              const { ClaudeAdapter } = await import('../providers/claude.js');
+              const { CodexAdapter } = await import('../providers/codex.js');
+              const { agentEnv } = await import('../security/sandbox.js');
+              const raw = id === 'claude' ? new ClaudeAdapter(cfg.providers[id]!, ctx.clock, agentEnv(cfg, id)) : id === 'codex' ? new CodexAdapter(cfg.providers[id]!, ctx.clock, agentEnv(cfg, id)) : null;
+              if (raw && (await raw.checkAuth()).ok) hint = ' — logged in, but not visible inside the agent sandbox: re-login as the service user, or approve the `credential_expansion` request (or set security.agentSandboxRelaxFor)';
+            }
+            out(`  ${id}: ${d.installed ? d.version : 'not installed'}; auth: ${au.ok ? 'ok' : 'NOT OK'} (${au.detail ?? ''})${hint}${au.apiKeyBilling ? ' — API-key billing (refused unless authorized)' : ''}`);
             const cap = d.installed && au.ok ? await a.probeCapacity() : null;
             if (cap) out(`    capacity: ${cap.available === null ? 'unknown' : cap.available ? 'available' : 'LIMITED'}${cap.resetAt ? `, resets ${ago(cap.resetAt)}` : ''}; ${cap.windows.map((w) => `${w.window} ${Math.round((w.utilization ?? 0) * 100)}% (resets ${ago(w.resetsAt ?? null)})`).join('; ')}`);
             else if (d.installed && au.ok) out('    capacity: not exposed without a model call (learned from rate-limit events during runs)');
