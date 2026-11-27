@@ -3,24 +3,20 @@
 This file is the durable hand-off for the session building this platform. Update it at each
 milestone boundary. Scheduled auto-resume reads "Next executable actions".
 
-## Current milestone (updated 2026-11-27 16:10 UTC)
-- Live dual-provider run 2 COMPLETED (verified greet 0.1.0; evidence docs/evidence/greet-dual-provider/SUMMARY.md),
-  on four successive builds and with two operator actions (unblock D-007, cancel D-008).
-- PR #61 (this branch → main) opened. The independent review returned REQUEST_CHANGES: 3 blocking, 7 non-blocking
-  findings. All were addressed in the follow-up commit:
-  - unblock → backlog (dependency re-resolution) or merge_ready when the head is reviewed and gated;
-  - cancel refused from merge_ready, merging and merged; cancel aborts running tasks; block and investigation never
-    revive terminal items;
-  - guidance is queried by kind; the merge-retry bound restarts after an unblock;
-  - audit wording and feedback fixed; the Codex billing guard fails closed;
-  - SUMMARY.md states the builds and the operator rescue.
-- `npm test` 56/56. The release ZIP was rebuilt from the fixed code (release/).
-- Remaining:
-  1. Re-review of PR #61 by the same reviewer subagent. Merge only on APPROVE.
-  2. After the merge, close #17, #19, #36, #37, #56 and #57 with evidence; close epics whose sub-issues are all closed.
-  3. Delete the hourly "Resume orchestrator build" task (trig_017TYriJi3K7RCRCucUNw7M5) and report.
-  4. Operator-only items are labelled `needs-operator`; the run book is docs/operator-verification-prompt.md.
-  5. Follow-up: a clean live run on one build, to measure cost without the meta-work loops.
+## Current milestone (updated 2026-11-27 16:20 UTC)
+- PR #61 merged into main (93ce394) at the independently approved commit 6a50a01. The first review returned
+  REQUEST_CHANGES; every finding was addressed, then the same reviewer approved.
+- `npm test` 56/56. Release `release/agent-workflow-orchestrator-0.1.0.zip` (sha256 fe3dd991…) is built from 93ce394
+  (the PR #61 merge) and was clean-room verified. Later follow-ups (PR #62) are not in the 0.1.0 ZIP.
+- Live evidence: wordfreq (Claude) and greet (Claude + Codex), both with verified releases.
+- GitHub tracking:
+  - Closed with evidence: #17, #19 and epic #3 (M2); #36, #37 and epic #7 (M6); #56, #57 and #60 (acceptance B, C, F).
+  - Everything still open is labelled `needs-operator` with exact requirements: #29–32, #45, #46, #48, #49, #52–55,
+    #58 and epics #5, #9, #10, #11, #12. The run book is docs/operator-verification-prompt.md.
+- This branch: small follow-ups from the re-review (merge-rejection limit restarts after unblock, wording, limitations).
+- **Mission status: complete, except items that genuinely need the operator** (a PAT, a fresh VM, a systemd host,
+  HawkScan, OCI). The hourly auto-resume task is deleted once this follow-up merges.
+- Next optional measurement: a clean live run on one build, to quantify cost without the meta-work loops.
 
 ## Verified facts (live evidence, 2026-11-27)
 - Claude Code CLI 2.1.332, subscription OAuth (`apiKeySource: "none"`). `claude -p --output-format stream-json`
