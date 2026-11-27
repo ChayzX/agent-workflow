@@ -122,6 +122,7 @@ orchestrator doctor
 | `start --goal F --repo R` | New project from a goal (`R` = `owner/name`, a local git path, or `new`) |
 | `status`, `tasks`, `messages`, `decisions`, `logs [--follow]` | Inspect real persisted state |
 | `pause`, `resume`, `stop` | Project control (queued to the supervisor) |
+| `unblock ITEM --note TEXT` | Return a wrongly blocked work item to ready, with guidance the next agent sees (audited) |
 | `approvals [approve\|deny ID]` | Operator authorizations (spending, re-auth, human review, deploys…) |
 | `release [--out DIR]` | Verified release ZIP location / export |
 | `run` / `daemon` | Foreground supervisor + dashboard (systemd runs `daemon`) |

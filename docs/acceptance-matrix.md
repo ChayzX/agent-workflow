@@ -25,15 +25,15 @@ whole duration. The redacted timeline is in `docs/evidence/wordfreq-live/events.
 | Requirement | Evidence | Status |
 |---|---|---|
 | Claude Code executes real tasks | 66 real `claude -p` sessions: plan, implement, review, security review, answer, investigate, integration and completion audits | ✅ live |
-| Codex executes real tasks | Real `codex exec --json` run captured, with usage-limit output (fixture). Live account and rate-limit reads through `codex app-server`. The full task run is scheduled after the 07:08 UTC reset. | ⏳ pending (07:12 UTC run) |
-| Both providers concurrently in isolated worktrees | `dist/test/live/live-acceptance.js` (two independent items routed to different providers) | ⏳ pending; ✅ sim (`e2e`) |
+| Codex executes real tasks | Live run 2 (2026-11-27, `docs/evidence/greet-dual-provider/`): Codex completed 7 implement, 6 remediate, 8 review, 2 security_review, 5 verify_fix, 8 answer, 1 debate_propose and 1 completion_audit tasks, with native `exec resume` after yields. It then hit a real usage limit with a provider-reported reset (15:12 UTC), and Claude continued the work. | ✅ live |
+| Both providers concurrently in isolated worktrees | Live run 2: W-001/W-002 and defects D-001..D-006 were worked by Claude and Codex at the same time, in separate worktrees (`maxConcurrent` 1 per provider, 2 overall). | ✅ live; ✅ sim (`e2e`) |
 | Agents resume or reconstruct sessions | Live: `remediate W-007 → claude/haiku (resume)` after an `invalid_output` failure, which was a native `--resume`. Sim: killed/hung agent resumed after a crash; failover reconstruction. | ✅ live + ✅ sim |
 
 ## C. Collaboration
 | Requirement | Evidence | Status |
 |---|---|---|
-| Codex asks Claude / Claude asks Codex | Live (Claude ⇄ Claude across roles): the W-003 implementer asked `product_manager` about U+2019 and the answer was delivered. The completion audit later caught that it was not implemented, and it was fixed. Cross-provider Q&A is in the live acceptance script. | ⏳ cross-provider pending; ✅ live (same provider); ✅ sim (cross-provider) |
-| Evidence-based debate with both providers | Sim: ADR-001 with a security objection, rebuttal, a final round, and a decision with a documented resolution; both providers took positions | ✅ sim; ⏳ live (07:12 run) |
+| Codex asks Claude / Claude asks Codex | Live run 2: Claude-run agents asked and Codex answered (10:57:51 W-002 shout form, 10:57:55 W-001 greeting, and later). A Codex-run agent asked and Claude answered (11:15:25, D-006). The asking task yielded its slot and resumed its own session after the answer (`task.waiting_message` → `task.resumed`). | ✅ live (both directions); ✅ sim |
+| Evidence-based debate with both providers | Live run 2: Codex proposed ADR-001 (README format), Claude agents evaluated it (2 positions), and Claude decided: "a single Usage section with one labeled example per function". W-003 was implemented to the ADR, and the completion audit checked it. Sim: a security objection, rebuttal, final round and documented resolution. | ✅ live; ✅ sim |
 | Decisions and communications survive restarts | Live: graceful SIGTERM restart at 05:03 mid-run, with messages and decisions intact. Sim: restart while waiting for capacity. | ✅ live + ✅ sim |
 
 ## D. GitHub and development
@@ -41,7 +41,7 @@ whole duration. The redacted timeline is in `docs/evidence/wordfreq-live/events.
 |---|---|---|
 | Issues, dependencies, project statuses created and managed | `test/github.test.ts` against a fake GitHub: labels, milestones, requirement issues, sub-issues, `blocked_by` dependencies, Projects v2 fields, re-sync and crash-replay idempotency, external reconciliation. The live API was unavailable here (the repo-scoped proxy token is rejected by REST). | ✅ sim; ⏳ live (`docs/live-acceptance.md` §2) |
 | Parallel implementation without overwriting work | Live: 15 work items in per-item worktrees, 2 agents at a time, 56 merge-gate runs, conflict path exercised (README conflict remediated) | ✅ live |
-| Providers review each other's code | Router excludes the implementer's provider. Live: Codex was exhausted, so the fallback was a different Claude agent, labelled "same provider as excluded (cross-provider unavailable)". Sim: cross-provider asserted. | ✅ sim; ⏳ live (07:12 run) |
+| Providers review each other's code | Live run 2: Codex reviewed Claude's work (W-001, W-002, D-001, D-003, D-005, D-006: reviews, security reviews, verify-fix), and Claude reviewed Codex's (W-003, D-002, D-004). Codex's `request_changes` drove real remediation rounds. When Codex was exhausted, the fallback was recorded as "same provider as excluded (cross-provider unavailable)". | ✅ live; ✅ sim |
 | Deliberate defect detected and remediated | Sim: W-001 `add` subtracts, real `node --test` fails, remediation, pass. Sim: missing negative test → medium finding → fix → `verify_fix` by the reviewer. Live: audits created D-001…D-006, all remediated or handled. | ✅ sim + ✅ live |
 | Independent verification and real CI prevent premature merge | Exact-commit invariant (gated = reviewed = merged). PR merge uses the `sha` precondition. CI `failure` → remediation. Required human review → approval, never impersonated (`github.test.ts`). | ✅ sim; ⏳ live CI |
 
