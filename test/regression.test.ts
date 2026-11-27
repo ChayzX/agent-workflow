@@ -94,7 +94,7 @@ test('review#7: completion audit never passes with a single auditor (failed audi
 
 test('review#4: symlinks never smuggle outside files into a package; zip refuses escaping links', () => {
   const d = mkdtempSync(join(tmpdir(), 'orch-sym-'));
-  mkdirSync(join(d, 'outside')); writeFileSync(join(d, 'outside', '.credentials.json'), '{"refresh_token":"abcdefghijklmnopqrstuvwxyz0123456789"}');
+  mkdirSync(join(d, 'outside')); writeFileSync(join(d, 'outside', '.credentials.json'), '{"refresh_token":"abcdefghijklmnopqrstuvwxyz0123456789"}'); // orchestrator:allow-secret (test fixture)
   mkdirSync(join(d, 'src'));
   writeFileSync(join(d, 'src', 'README.md'), '# x\n');
   symlinkSync(join(d, 'outside', '.credentials.json'), join(d, 'src', 'notes.md'));
@@ -114,8 +114,8 @@ test('review#4: symlinks never smuggle outside files into a package; zip refuses
 });
 
 test('review#11: secret scanner catches JSON-keyed secrets and Claude OAuth tokens', () => {
-  assert.ok(scanText('a.json', '{ "api_key": "abcdefghijklmnopqrstuvwxyz123456" }').length > 0);
-  assert.ok(scanText('a.json', '"refresh_token":"Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MA"').length > 0);
+  assert.ok(scanText('a.json', '{ "api_key": "abcdefghijklmnopqrstuvwxyz123456" }').length > 0); // orchestrator:allow-secret (test fixture)
+  assert.ok(scanText('a.json', '"refresh_token":"Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MA"').length > 0); // orchestrator:allow-secret (test fixture)
   assert.ok(scanText('c.txt', 'sk-ant-oat01-' + 'A'.repeat(40)).length > 0);
 });
 
