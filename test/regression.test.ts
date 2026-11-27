@@ -439,3 +439,23 @@ test('live finding (run 2): operator can unblock a wrongly blocked item; guidanc
     assert.equal(h.sup.workflow.unblock(h.sup.workflow.store.project(p0.id)!, 'W-002', 'x', 'operator'), 'W-002 is done, not blocked');
   } finally { h.cleanup(); }
 });
+
+test('live finding (run 2): operator cancel descopes a vague item; the project still completes; audited', async () => {
+  const h = makeHarness(demoBehaviour());
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    let cancelled = false;
+    const p = await drive(h, (x) => done(x.status), p0.id, { maxTicks: 900, onTick: () => {
+      const cur = h.sup.workflow.store.project(p0.id)!;
+      if (!cancelled && cur.status === 'active') {
+        cancelled = true;
+        const d = h.sup.workflow.createDefect(cur, { title: 'Documentation does not match implementation', description: 'vague', severity: 'medium', paths: [], source: 'completion-audit', acceptance: ['docs accurate'] });
+        issueCommand(h.ctx, 'cancel_item', p0.id, { key: d.key, note: 'vague audit verdict; superseded' }, 'operator');
+      }
+    } });
+    assert.ok(cancelled);
+    assert.equal(p.status, 'completed', p.status_reason ?? '');
+    assert.equal(h.ctx.db.get<{ status: string }>("SELECT status FROM work_items WHERE title='Documentation does not match implementation'")!.status, 'cancelled');
+    assert.ok(h.ctx.db.get("SELECT 1 FROM audit_log WHERE action='workitem.descoped'"));
+  } finally { h.cleanup(); }
+});

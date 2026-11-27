@@ -123,6 +123,7 @@ orchestrator doctor
 | `status`, `tasks`, `messages`, `decisions`, `logs [--follow]` | Inspect real persisted state |
 | `pause`, `resume`, `stop` | Project control (queued to the supervisor) |
 | `unblock ITEM --note TEXT` | Return a wrongly blocked work item to ready, with guidance the next agent sees (audited) |
+| `cancel ITEM --note TEXT` | Descope a work item (operator decision, audited; local equivalent of closing its issue as not planned) |
 | `approvals [approve\|deny ID]` | Operator authorizations (spending, re-auth, human review, deploys…) |
 | `release [--out DIR]` | Verified release ZIP location / export |
 | `run` / `daemon` | Foreground supervisor + dashboard (systemd runs `daemon`) |

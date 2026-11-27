@@ -82,6 +82,7 @@ Projects
   status [project]                                 Verified requirement coverage, work, agents, blockers
   pause|resume|stop [project]
   unblock ITEM [project] --note TEXT               Return a blocked work item to ready, with guidance (audited)
+  cancel ITEM [project] --note TEXT                Descope a work item (operator decision, audited)
   tasks [project]   messages [project]   decisions [project]
   logs [--project P] [--follow] [--limit N]
   release [project] [--out DIR]                    Show / export the verified release ZIP
@@ -174,6 +175,13 @@ async function main(): Promise<number> {
         const id = resolveProject(store, c1);
         issueCommand(ctx, c0, id, {}, 'cli');
         out(`${c0} queued for ${id}${daemonPid(cfg) ? '' : ' (applies when the supervisor starts)'}`);
+        return 0;
+      }
+      case 'cancel': {
+        if (!c1 || !flags.note) throw new Error('usage: orchestrator cancel ITEM [project] --note "why this work is descoped"');
+        const id = resolveProject(store, c2);
+        issueCommand(ctx, 'cancel_item', id, { key: c1, note: String(flags.note) }, 'cli');
+        out(`cancel of ${c1} queued for ${id}${daemonPid(cfg) ? '' : ' (applies when the supervisor starts)'}`);
         return 0;
       }
       case 'unblock': {

@@ -199,12 +199,27 @@ export class Workflow {
     const w = this.store.workItemByKey(p.id, key);
     if (!w) return `no work item ${key}`;
     if (w.status !== 'blocked') return `${key} is ${w.status}, not blocked`;
-    if (!this.store.transition(w.id, ['blocked'], 'ready', {}, `unblocked by ${by}: ${note}`.slice(0, 500))) return 'state changed concurrently; retry';
+    if (!this.store.transition(w.id, ['blocked'], 'ready', { remediation_rounds: 0 }, `unblocked by ${by}: ${note}`.slice(0, 500))) return 'state changed concurrently; retry';
     for (const rk of json<string[]>(w.requirement_keys, [])) if (this.store.requirement(p.id, rk)?.status === 'blocked') this.store.setRequirementStatus(p.id, rk, 'open', [{ unblocked: w.key, by }], null);
     this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'operator_unblock', summary: `Operator guidance: ${note}` });
     this.ctx.events.audit(by, 'workitem.unblock', { projectId: p.id, target: w.key, detail: { note } });
     this.ctx.events.emit('workitem.unblocked', `${w.key} unblocked by ${by}: ${note}`, { projectId: p.id });
     if (p.status === 'blocked') this.store.setProjectStatus(p.id, 'active', `${w.key} unblocked by ${by}`);
+    return 'ok';
+  }
+
+  /** Operator descoping (local equivalent of closing an issue as "not planned"): authorized, recorded, audited. */
+  cancelItem(p: ProjectRow, key: string, note: string, by: string): string {
+    const w = this.store.workItemByKey(p.id, key);
+    if (!w) return `no work item ${key}`;
+    if (['done', 'cancelled', 'merging'].includes(w.status)) return `${key} is ${w.status}; not cancelled`;
+    if (!this.store.transition(w.id, [w.status], 'cancelled', {}, `cancelled by ${by}: ${note}`.slice(0, 500))) return 'state changed concurrently; retry';
+    this.ctx.queue.cancelForWorkItem(w.id, `cancelled by ${by}`);
+    for (const rk of json<string[]>(w.requirement_keys, [])) if (this.store.requirement(p.id, rk)?.status === 'blocked') this.store.setRequirementStatus(p.id, rk, 'open', [{ cancelled: w.key, by }], null);
+    this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'operator_cancel', summary: `Cancelled by operator: ${note}` });
+    this.ctx.events.audit(by, 'workitem.descoped', { projectId: p.id, target: w.key, detail: { note } });
+    this.ctx.events.emit('workitem.cancelled', `${w.key} cancelled by ${by}: ${note}`, { projectId: p.id, level: 'warn' });
+    if (p.status === 'blocked') this.store.setProjectStatus(p.id, 'active', `${w.key} cancelled by ${by}`);
     return 'ok';
   }
 
