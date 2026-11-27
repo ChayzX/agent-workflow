@@ -3,17 +3,18 @@
 This file is the durable hand-off for the session building this platform. Update it at each
 milestone boundary. Scheduled auto-resume reads "Next executable actions".
 
-## Current milestone (updated 2026-11-27 05:35 UTC)
-- All milestones implemented. `npm test` 36/36. Live wordfreq run COMPLETED with verified release (evidence in
-  docs/evidence/wordfreq-live, matrix in docs/acceptance-matrix.md).
-- Independent review of PR #1 found 12 defects → all fixed in cc58de6 with regression tests; RE-REVIEW requested
-  (reviewer posts a COMMENT review with a verdict on PR #1).
+## Current milestone (updated 2026-11-27 05:58 UTC)
+- PR #1 MERGED into main (a7673a9) at the exact independently approved commit 06a82ed, after 5 review rounds
+  (24 findings, all verified fixed). Branch restarted from main; follow-up commit 7a6924b (non-blocking review item).
+- `npm test` 44/44. Live wordfreq run completed with a verified release (docs/evidence/wordfreq-live).
 - Remaining:
-  1. Re-review verdict → fix anything found → merge PR #1 into main (operator authorized agent merges after review).
-  2. After 07:08 UTC Codex reset (scheduled wake 07:12): `node --disable-warning=ExperimentalWarning dist/test/live/live-acceptance.js <scratchpad>/orch-live2`
-     → record cross-provider Q&A/review/debate/audit evidence in docs/acceptance-matrix.md (rows marked ⏳).
-  3. Final self-package ZIP + checksums (orchestrator self-package), attach to a GitHub Release if possible or leave in releases/.
-  4. Delete the hourly "Resume orchestrator build" scheduled task when done.
+  1. ~07:12 UTC (scheduled wake): dual-provider live run:
+     `ORCH_LIVE_RELAX=claude node --disable-warning=ExperimentalWarning dist/test/live/live-acceptance.js <scratchpad>/orch-live2`
+     (ORCH_LIVE_RELAX documented: on this managed host Claude's login lives outside the service home.)
+     Record cross-provider Q&A/review/debate/audit evidence in docs/acceptance-matrix.md (⏳ rows) + docs/evidence/.
+  2. Self-package ZIP + .sha256 → commit under release/ (no release-creation tool available) and send to the user.
+  3. Open PR #2 (follow-up + live evidence), independent review, merge.
+  4. GitHub issue tracking update (agent running), then delete the hourly "Resume orchestrator build" task.
 
 ## Verified facts (live evidence, 2026-11-27)
 - Claude Code CLI 2.1.332, subscription OAuth (`apiKeySource: "none"`). `claude -p --output-format stream-json`
