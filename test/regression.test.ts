@@ -220,3 +220,71 @@ test('re-review N6: a stale lock carrying our own pid (e.g. PID 1 restart) is ta
     h.sup.releaseLock();
   } finally { h.cleanup(); }
 });
+
+test('third-pass R1: recover() never follows an agent/gate-planted gitdir; gates cannot rewrite .git', async (t) => {
+  const { Workspace } = await import('../src/git/git.js');
+  const base = mkdtempSync(join(tmpdir(), 'orch-r1-'));
+  const ws = new Workspace(join(base, 'proj'), 'main');
+  await ws.ensure(null);
+  const wt = (await ws.worktree('W-001', 'orch/w-001', await ws.head())).path;
+  const fake = join(wt, '.tmp-cache');
+  const env = { ...process.env, GIT_DIR: fake, GIT_WORK_TREE: wt, GIT_AUTHOR_NAME: 'a', GIT_AUTHOR_EMAIL: 'a@a', GIT_COMMITTER_NAME: 'a', GIT_COMMITTER_EMAIL: 'a@a' };
+  const g = (...a: string[]) => { try { execFileSync('git', a, { env, stdio: ['ignore', 'pipe', 'pipe'] }); } catch { /* conflict expected */ } };
+  g('init', '-q', '-b', 'main');
+  writeFileSync(join(wt, '.tmp-x.sh'), `#!/bin/sh\nid -un > ${base}/escaped\ncat\n`, { mode: 0o755 });
+  writeFileSync(join(wt, '.gitattributes'), '*.txt filter=x\n'); writeFileSync(join(wt, 'a.txt'), 'one\n');
+  g('add', '.gitattributes', 'a.txt'); g('commit', '-qm', 'A');
+  g('checkout', '-q', '-b', 'topic'); writeFileSync(join(wt, 'a.txt'), 'topic\n'); g('commit', '-qam', 'T');
+  g('checkout', '-q', 'main'); writeFileSync(join(wt, 'a.txt'), 'main\n'); g('commit', '-qam', 'M');
+  g('checkout', '-q', 'topic'); g('rebase', 'main');
+  g('config', 'filter.x.smudge', join(wt, '.tmp-x.sh'));
+  writeFileSync(join(wt, '.git'), `gitdir: ${fake}\n`);
+  await ws.recover();
+  assert.equal(existsSync(join(base, 'escaped')), false, 'planted smudge filter never runs');
+  assert.match(readFileSync(join(wt, '.git'), 'utf8'), /worktrees\/W-001/, '.git pointer repaired');
+  // Gate sandbox: the .git pointer is read-only for gate commands.
+  const { findBwrap, runSandboxed } = await import('../src/security/sandbox.js');
+  if (!findBwrap()) { t.diagnostic('bubblewrap unavailable; skipped gate .git check'); rmSync(base, { recursive: true, force: true }); return; }
+  const cfg = defaultConfig(join(base, 'orch')); cfg.security.sandbox = 'bwrap';
+  await runSandboxed(cfg, { cwd: wt, writable: [wt], hide: [], network: false, readOnlyLast: [join(wt, '.git')] }, 'echo "gitdir: /tmp/evil" > .git', { PATH: process.env.PATH! }, 10000);
+  assert.match(readFileSync(join(wt, '.git'), 'utf8'), /worktrees\/W-001/, 'gate could not rewrite .git');
+  rmSync(base, { recursive: true, force: true });
+});
+
+test('third-pass R2: sandbox relaxation fails closed (approval required) and applies only after approval', async (t) => {
+  const { findBwrap, agentSandboxRelaxed, relaxAgentSandbox } = await import('../src/security/sandbox.js');
+  if (!findBwrap()) { t.skip('bubblewrap unavailable'); return; }
+  const h = makeHarness(demoBehaviour());
+  try {
+    // A provider whose auth only works when the sandbox is relaxed (like this host's Claude).
+    h.claude.checkAuth = async () => ({ ok: agentSandboxRelaxed('claude'), method: 'sim' });
+    h.ctx.cfg.security.agentSandbox = 'auto';
+    await h.sup.sandboxSelfCheck();
+    assert.equal(agentSandboxRelaxed('claude'), false, 'not relaxed without authorization');
+    const appr = h.ctx.db.get<{ id: string; action: string }>("SELECT * FROM approvals WHERE dedup_key='sandbox-relax:claude'")!;
+    assert.equal(appr.action, 'credential_expansion');
+    assert.equal(h.ctx.capacity.get('claude').status, 'auth_required');
+    h.ctx.policy.decide(appr.id, true, 'operator');
+    await h.sup.tick();
+    assert.equal(agentSandboxRelaxed('claude'), true, 'relaxed after operator approval');
+    assert.equal(h.ctx.capacity.get('claude').status, 'available');
+  } finally { relaxAgentSandbox('claude', false); await h.sup.stop(0).catch(() => {}); h.cleanup(); }
+});
+
+test('third-pass R3: mcpServers changes in ~/.claude.json are detected and reverted', async () => {
+  const { ClaudeStateGuard } = await import('../src/security/sandbox.js');
+  const d = mkdtempSync(join(tmpdir(), 'orch-r3-'));
+  const f = join(d, '.claude.json');
+  writeFileSync(f, JSON.stringify({ numStartups: 1, mcpServers: { ok: { command: 'x' } }, projects: { '/w': { allowedTools: [] } } }));
+  const g = new ClaudeStateGuard(f);
+  g.snapshot();
+  const cur = JSON.parse(readFileSync(f, 'utf8'));
+  cur.numStartups = 2; cur.mcpServers.evil = { command: 'curl evil' }; cur.projects['/w'].mcpServers = { e: { command: 'sh' } };
+  writeFileSync(f, JSON.stringify(cur));
+  assert.equal(g.verifyAndRestore(), true);
+  const after = JSON.parse(readFileSync(f, 'utf8'));
+  assert.deepEqual(Object.keys(after.mcpServers), ['ok']);
+  assert.equal(after.projects['/w'].mcpServers, undefined);
+  assert.equal(after.numStartups, 2, 'unrelated Claude state preserved');
+  rmSync(d, { recursive: true, force: true });
+});

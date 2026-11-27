@@ -44,7 +44,7 @@ export interface Config {
     checksTimeoutMin: number; requireChecks: boolean;
   };
   security: {
-    allowedRepos: string[]; sandbox: 'auto' | 'bwrap' | 'none'; agentSandbox?: 'auto' | 'bwrap' | 'none'; gateNetwork: boolean;
+    allowedRepos: string[]; sandbox: 'auto' | 'bwrap' | 'none'; agentSandbox?: 'auto' | 'bwrap' | 'none'; agentSandboxRelaxFor?: string[]; gateNetwork: boolean;
     approvalRequiredFor: string[]; protectedPathGlobs: string[];
   };
   dashboard: { host: string; port: number; tokenHash: string | null; sessionHours: number; trustProxy?: boolean };

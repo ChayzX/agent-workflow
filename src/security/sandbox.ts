@@ -1,7 +1,7 @@
 // Process isolation for untrusted commands (quality gates, release verification) and
 // environment scrubbing for agents. Git worktrees are NOT security boundaries; this layer,
 // the provider CLIs' own sandboxes and the systemd unit hardening provide isolation.
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -63,6 +63,7 @@ function trustPaths(): string[] {
 export interface SandboxSpec {
   cwd: string;
   writable: string[];          // only these paths are writable
+  readOnlyLast?: string[];     // re-bound read-only on top of writable paths (e.g. a worktree's `.git` pointer)
   hide: string[];              // paths replaced by empty tmpfs (credentials, orchestrator home)
   network: boolean;
 }
@@ -88,6 +89,7 @@ export function wrapCommand(cfg: Config, spec: SandboxSpec, command: string): { 
   for (const t of [...new Set(tool)]) args.push('--ro-bind', t, t);
   if (spec.network) for (const t of trustPaths()) if (under(t)) args.push('--ro-bind', t, t);
   for (const w of spec.writable) args.push('--bind', w, w);
+  for (const r of spec.readOnlyLast ?? []) if (existsSync(r)) args.push('--ro-bind', r, r);
   args.push('--chdir', spec.cwd, 'sh', '-c', command);
   return { cmd: findBwrap()!, args, mode };
 }
@@ -112,6 +114,8 @@ export interface AgentSandboxSpec {
  * user's home and ORCH_HOME stay hidden. Decided by a startup self-check, never by configuration from agents.
  */
 const relaxedProviders = new Set<string>();
+// Note: relaxation widens what agents can read (other accounts' homes). It is applied only when the operator
+// authorized it (security.agentSandboxRelaxFor or an approved `credential_expansion` approval).
 export function relaxAgentSandbox(provider: string, on = true): void { if (on) relaxedProviders.add(provider); else relaxedProviders.delete(provider); }
 export function agentSandboxRelaxed(provider: string): boolean { return relaxedProviders.has(provider); }
 
@@ -151,13 +155,53 @@ export function wrapAgentCommand(cfg: Config, spec: AgentSandboxSpec, cmd: strin
     .concat(spec.provider === 'codex' && process.env.CODEX_HOME ? [process.env.CODEX_HOME] : [])
     .concat(['.npm', '.cache'].map((p) => join(home, p)));
   for (const p of [...new Set(providerPaths)]) if (existsSync(p)) a.push('--bind', p, p);
-  const protectedFiles = spec.provider === 'claude'
-    ? ['settings.json', 'settings.local.json', 'hooks', 'plugins', 'agents', 'commands', 'CLAUDE.md'].map((f) => join(home, '.claude', f))
-    : ['config.toml', 'hooks.json', 'rules', 'AGENTS.md', 'plugins', 'skills'].map((f) => join(process.env.CODEX_HOME ?? join(home, '.codex'), f));
-  for (const f of protectedFiles) if (existsSync(f)) a.push('--ro-bind', f, f);
+  const claudeDirs = [join(home, '.claude'), ...(process.env.CLAUDE_CONFIG_DIR ? [process.env.CLAUDE_CONFIG_DIR] : [])];
+  const codexDir = process.env.CODEX_HOME ?? join(home, '.codex');
+  const protectedFiles: Array<[string, 'file' | 'dir', string]> = spec.provider === 'claude'
+    ? claudeDirs.flatMap((d) => [[join(d, 'settings.json'), 'file', '{}\n'], [join(d, 'settings.local.json'), 'file', '{}\n'], [join(d, 'CLAUDE.md'), 'file', ''],
+        [join(d, 'hooks'), 'dir', ''], [join(d, 'plugins'), 'dir', ''], [join(d, 'agents'), 'dir', ''], [join(d, 'commands'), 'dir', ''], [join(d, 'skills'), 'dir', '']] as Array<[string, 'file' | 'dir', string]>)
+    : [[join(codexDir, 'config.toml'), 'file', ''], [join(codexDir, 'hooks.json'), 'file', '{}\n'], [join(codexDir, 'AGENTS.md'), 'file', ''],
+        [join(codexDir, 'rules'), 'dir', ''], [join(codexDir, 'plugins'), 'dir', ''], [join(codexDir, 'skills'), 'dir', '']];
+  for (const [f, kind, empty] of protectedFiles) {
+    if (!existsSync(dirname(f))) continue; // provider dir not present: nothing to protect or plant into
+    // Absent config is created with a neutral default and bound read-only, so agents cannot plant it.
+    try { if (!existsSync(f)) { if (kind === 'dir') mkdirSync(f, { recursive: true, mode: 0o700 }); else writeFileSync(f, empty, { mode: 0o600 }); } } catch { continue; }
+    a.push('--ro-bind', f, f);
+  }
   for (const r of spec.readOnly) if (existsSync(r)) a.push('--ro-bind', r, r);
   for (const w of spec.writable) if (existsSync(w)) a.push('--bind', w, w);
   for (const r of spec.readOnlyLast ?? []) if (existsSync(r)) a.push('--ro-bind', r, r);
   a.push('--', cmd, ...args);
   return { cmd: findBwrap()!, args: a };
+}
+
+/**
+ * `~/.claude.json` must stay writable for Claude's own state, but its `mcpServers` entries (top-level and
+ * per-project) can start commands. Snapshot them and revert any change made during an agent run.
+ */
+export class ClaudeStateGuard {
+  private baseline: string | null = null;
+  constructor(private file = join(homedir(), '.claude.json')) {}
+  private pick(o: Record<string, any>): string {
+    const projects = Object.fromEntries(Object.entries(o.projects ?? {}).map(([k, v]: [string, any]) => [k, v?.mcpServers ?? null]));
+    return JSON.stringify({ mcpServers: o.mcpServers ?? null, projects });
+  }
+  snapshot(): void {
+    try { this.baseline = this.pick(JSON.parse(readFileSync(this.file, 'utf8'))); } catch { this.baseline = null; }
+  }
+  /** Returns true when a change was found and reverted. */
+  verifyAndRestore(): boolean {
+    if (this.baseline === null || !existsSync(this.file)) return false;
+    let cur: Record<string, any>;
+    try { cur = JSON.parse(readFileSync(this.file, 'utf8')); } catch { return false; }
+    if (this.pick(cur) === this.baseline) return false;
+    const base = JSON.parse(this.baseline) as { mcpServers: unknown; projects: Record<string, unknown> };
+    if (base.mcpServers === null) delete cur.mcpServers; else cur.mcpServers = base.mcpServers;
+    for (const [k, v] of Object.entries(cur.projects ?? {}) as Array<[string, any]>) {
+      const want = base.projects[k];
+      if (want === undefined || want === null) { if (v && 'mcpServers' in v) delete v.mcpServers; } else v.mcpServers = want;
+    }
+    writeFileSync(this.file, JSON.stringify(cur, null, 2), { mode: 0o600 });
+    return true;
+  }
 }

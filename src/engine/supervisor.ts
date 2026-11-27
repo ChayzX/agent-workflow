@@ -9,7 +9,7 @@ import { newId, randomToken } from '../core/ids.js';
 import type { ExecFailure, ExecResult } from '../providers/types.js';
 import { killTree } from '../providers/process.js';
 import type { FailureClass, ProjectRow, TaskRow } from '../core/types.js';
-import { agentEnv, agentSandboxMode, relaxAgentSandbox, wrapAgentCommand } from '../security/sandbox.js';
+import { agentEnv, agentSandboxMode, ClaudeStateGuard, relaxAgentSandbox, wrapAgentCommand } from '../security/sandbox.js';
 import { validate } from '../util/validate.js';
 import { buildPrompt } from './context.js';
 import type { Ctx } from './ctx.js';
@@ -99,7 +99,10 @@ export class Supervisor {
   }
 
   /** Verify each provider still authenticates inside the agent sandbox; relax (audited) only when required. */
+  readonly claudeState = new ClaudeStateGuard();
+
   async sandboxSelfCheck(): Promise<void> {
+    this.claudeState.snapshot();
     if (agentSandboxMode(this.ctx.cfg) !== 'bwrap') {
       this.ctx.events.emit('security.sandbox', 'agent sandbox unavailable (no bubblewrap): agents run with a scrubbed environment only', { level: 'warn' });
       return;
@@ -110,10 +113,32 @@ export class Supervisor {
       if (strict.ok) continue;
       relaxAgentSandbox(id, true);
       const relaxed = await a.checkAuth().catch(() => ({ ok: false }));
-      if (relaxed.ok) {
-        this.ctx.events.emit('security.sandbox_relaxed', `${id}: authentication depends on files outside the service user's home; other accounts' homes stay visible to ${id} agents (ORCH_HOME and the service home remain hidden)`, { level: 'warn' });
+      relaxAgentSandbox(id, false);
+      if (!relaxed.ok) continue; // genuinely not logged in: strict confinement stays; auth handling takes over
+      const dedup = `sandbox-relax:${id}`;
+      const authorized = (this.ctx.cfg.security.agentSandboxRelaxFor ?? []).includes(id) || this.ctx.policy.status(dedup)?.status === 'approved';
+      if (authorized) {
+        relaxAgentSandbox(id, true);
+        this.ctx.events.emit('security.sandbox_relaxed', `${id}: authentication depends on files outside the service user's home; other accounts' homes are visible to ${id} agents by operator authorization (ORCH_HOME and the service home remain hidden)`, { level: 'warn' });
         this.ctx.events.audit('supervisor', 'security.sandbox_relaxed', { detail: { provider: id } });
-      } else relaxAgentSandbox(id, false); // genuinely not logged in: keep strict confinement
+      } else {
+        // Fail closed: do not widen credential exposure without the operator.
+        this.ctx.policy.request('credential_expansion', `${id} cannot authenticate inside the agent sandbox on this host: its login lives outside the service user's home. Approving lets ${id} agents read other accounts' home directories (ORCH_HOME stays hidden). Prefer re-running \`${id === 'claude' ? 'claude login' : 'codex login'}\` as the service user instead.`, { requestedBy: 'supervisor', dedup, payload: { provider: id } });
+        this.ctx.capacity.recordFailure(id, { cls: 'auth', message: 'provider cannot authenticate inside the agent sandbox (approval credential_expansion pending)' });
+        this.sandboxPending.add(id);
+      }
+    }
+  }
+
+  private sandboxPending = new Set<string>();
+  /** Apply an operator's approval of a pending sandbox relaxation without restarting. */
+  private applySandboxApprovals(): void {
+    for (const id of [...this.sandboxPending]) {
+      if (this.ctx.policy.status(`sandbox-relax:${id}`)?.status !== 'approved') continue;
+      relaxAgentSandbox(id, true);
+      this.sandboxPending.delete(id);
+      this.ctx.capacity.reset(id, 'sandbox relaxation approved by operator');
+      this.ctx.events.audit('supervisor', 'security.sandbox_relaxed', { detail: { provider: id, via: 'approval' } });
     }
   }
 
@@ -164,6 +189,7 @@ export class Supervisor {
   async tick(): Promise<void> {
     this.ticks++;
     this.processCommands();
+    this.applySandboxApprovals();
     const now = this.ctx.clock.now();
     if (now - this.lastCapacityTick >= 30_000 || this.ticks === 1) {
       this.lastCapacityTick = now;
@@ -388,6 +414,10 @@ export class Supervisor {
       });
     } finally {
       clearInterval(hb);
+    }
+    if (route.provider === 'claude' && this.claudeState.verifyAndRestore()) {
+      ctx.events.emit('security.provider_config_tamper', `reverted mcpServers changes in ~/.claude.json after task ${task.id}`, { projectId: task.project_id, taskId: task.id, level: 'error' });
+      ctx.events.audit('supervisor', 'security.provider_config_tamper', { projectId: task.project_id, target: task.id });
     }
     if (result.sessionId) ctx.queue.setSession(task.id, this.instanceId, result.sessionId, route.provider);
     ctx.db.run('UPDATE sessions SET status=?, failure_class=?, exit_code=?, ended_at=?, provider_session_id=COALESCE(provider_session_id, ?) WHERE id=?',

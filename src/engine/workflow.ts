@@ -147,9 +147,9 @@ export class Workflow {
         case 'gating': if (w.head_commit && w.gated_commit !== w.head_commit) this.job(`gate:${w.id}:${w.head_commit}`, p.id, () => this.gate(p, w)); break;
         case 'in_review': this.ensureReviews(p, w); break;
         case 'remediation': this.ensureRemediation(p, w); break;
-        case 'merge_ready': this.job(`merge:${p.id}`, p.id, () => this.merge(p, w)); break; // merges serialized per project
-        case 'merging': this.job(`merge:${p.id}`, p.id, () => this.continueRemoteMerge(p, w)); break;
-        case 'merged': this.job(`finalize:${w.id}`, p.id, () => this.finalize(p, w)); break;
+        case 'merge_ready': this.job(`integration:${p.id}`, p.id, () => this.merge(p, w)); break; // integration-worktree ops serialized per project
+        case 'merging': this.job(`integration:${p.id}`, p.id, () => this.continueRemoteMerge(p, w)); break;
+        case 'merged': this.job(`integration:${p.id}`, p.id, () => this.finalize(p, w)); break;
         case 'implementing': this.repairStalled(p, w); break;
       }
     }
@@ -564,7 +564,7 @@ export class Workflow {
     const audit = this.ctx.db.get<{ id: string; status: string; round: number; commit_sha: string | null }>("SELECT * FROM audits WHERE project_id=? AND kind='completion' ORDER BY created_at DESC LIMIT 1", p.id);
     if (!audit) { this.store.setProjectStatus(p.id, 'active'); return; }
     if (audit.status === 'pending') {
-      this.job(`audit-gates:${audit.id}`, p.id, async () => {
+      this.job(`integration:${p.id}`, p.id, async () => {
         const ws = this.ws(p);
         if (p.repo_mode === 'github') await ws.syncDefaultFromRemote();
         const head = await ws.head();
@@ -659,7 +659,7 @@ export class Workflow {
   }
 
   private advanceReleasing(p: ProjectRow): void {
-    this.job(`release:${p.id}`, p.id, async () => {
+    this.job(`integration:${p.id}`, p.id, async () => {
       const audit = this.ctx.db.get<{ commit_sha: string }>("SELECT commit_sha FROM audits WHERE project_id=? AND kind='completion' AND status='passed' ORDER BY created_at DESC LIMIT 1", p.id);
       const ws = this.ws(p);
       const head = await ws.head();

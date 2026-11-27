@@ -34,7 +34,7 @@ export async function runGates(ctx: Ctx, opts: { projectId: string; workItemId: 
     const started = ctx.clock.now();
     const r = await runSandboxed(
       ctx.cfg,
-      { cwd: opts.cwd, writable: [opts.cwd, home], hide: [ctx.paths.home], network: ctx.cfg.security.gateNetwork },
+      { cwd: opts.cwd, writable: [opts.cwd, home], hide: [ctx.paths.home], network: ctx.cfg.security.gateNetwork, readOnlyLast: [join(opts.cwd, '.git')] },
       g.command,
       gateEnv(ctx.cfg, home),
       (g.timeout_sec ?? 900) * 1000,

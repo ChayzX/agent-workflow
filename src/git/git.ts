@@ -272,12 +272,15 @@ export class Workspace {
     const fixed: string[] = [];
     const dirs = [this.integration, ...(existsSync(this.wtRoot) ? readdirSync(this.wtRoot).map((d) => join(this.wtRoot, d)) : [])];
     for (const dir of dirs) {
-      if (!existsSync(join(dir, '.git'))) continue;
-      const gitDir = (await git(dir, ['rev-parse', '--git-dir'], { allowFail: true })).stdout.trim();
-      const abs = gitDir.startsWith('/') ? gitDir : join(dir, gitDir);
+      const key = this.keyFor(dir);
+      if (!key) continue;
+      // The admin dir comes from the trusted layout, never from `.git` / rev-parse (agent- or gate-writable).
+      const abs = join(this.bare, 'worktrees', key);
+      if (!existsSync(abs)) continue;
+      await this.guard(dir);
       const lock = join(abs, 'index.lock');
       if (existsSync(lock) && Date.now() - statSync(lock).mtimeMs > 120_000) { unlinkSync(lock); fixed.push(`${dir}: removed stale index.lock`); }
-      if (existsSync(join(abs, 'rebase-merge')) || existsSync(join(abs, 'rebase-apply'))) { await git(dir, ['rebase', '--abort'], { allowFail: true }); fixed.push(`${dir}: aborted rebase`); }
+      if (existsSync(join(abs, 'rebase-merge')) || existsSync(join(abs, 'rebase-apply'))) { await this.gitIn(dir, ['rebase', '--abort'], { allowFail: true }); fixed.push(`${dir}: aborted rebase`); }
       if (dir === this.integration && existsSync(join(abs, 'MERGE_HEAD'))) { await this.abortMerge(); fixed.push(`${dir}: aborted merge`); }
     }
     await git(this.bare, ['worktree', 'prune'], { allowFail: true });
