@@ -219,6 +219,8 @@ export class Supervisor {
       if (waiting.n && !runningOrQueued && !this.workflow.jobCount(p.id)) {
         const reason = `waiting for provider capacity (${waiting.n} task(s)); next check ${new Date(waiting.nb).toISOString()}`;
         if (p.status_reason !== reason) this.ctx.db.run('UPDATE projects SET status_reason=? WHERE id=?', reason, p.id);
+      } else if (p.status_reason?.startsWith('waiting for provider capacity') && runningOrQueued) {
+        this.ctx.db.run('UPDATE projects SET status_reason=? WHERE id=?', 'capacity restored; work resumed', p.id);
       }
     }
   }

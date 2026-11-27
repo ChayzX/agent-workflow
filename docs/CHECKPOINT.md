@@ -3,8 +3,15 @@
 This file is the durable hand-off for the session building this platform. Update it at each
 milestone boundary. Scheduled auto-resume reads "Next executable actions".
 
-## Current milestone
-M1–M3 (core storage, provider adapters, scheduler) in progress.
+## Current milestone (updated 2026-11-27 05:15 UTC)
+M1–M10 implemented; 28/28 automated tests pass (unit, GitHub contract, dashboard security, simulated E2E, recovery E/A–F).
+Live acceptance in progress:
+- wordfreq (single goal, real Claude; Codex exhausted until 07:08): home scratchpad/orch-live, daemon `orchestrator run`.
+  Evidence so far: plan → 9 work items, gates, same-provider reviews (labelled), live Q&A, integration audit created 3 defects
+  that were remediated, graceful SIGTERM restart (05:03), REAL Claude 5-hour limit hit at 05:10:13 with both providers
+  exhausted → waited → canary recovery 05:11:43 → native session resume.
+- Next: at/after 07:08 UTC run `node --disable-warning=ExperimentalWarning dist/test/live/live-acceptance.js <home>` for
+  dual-provider Codex⇄Claude Q&A, cross review, debate, dual audit (scratchpad/orch-live2).
 
 ## Verified facts (live evidence, 2026-11-27)
 - Claude Code CLI 2.1.332, subscription OAuth (`apiKeySource: "none"`). `claude -p --output-format stream-json`
@@ -33,7 +40,10 @@ git: git (Workspace)
 security: sandbox, policy, secrets
 util: validate
 
-## Next executable actions
+## Next executable actions (remaining)
+0. Finish live runs above; write docs/acceptance-matrix.md + docs/live-acceptance.md from evidence; self-package + clean-dir install verification; independent review subagent on PR #1, then merge.
+
+## Original plan (done unless noted)
 1. Write: providers/simulated.ts + registry; engine/context.ts (prompt builder), team.ts, messages.ts, debate.ts,
    gates.ts, workflow.ts (lifecycle handlers), supervisor.ts (tick loop, leases, recovery, shutdown), release.ts + util/zip.ts.
 2. github/client.ts (REST+GraphQL), github/sync.ts (idempotent issues/sub-issues/dependencies/projects/PRs/releases).
