@@ -1,0 +1,25 @@
+# Instantiate the base for one project. Copy this directory to overlays/<project>/ and set:
+#   namespace   - orch-<project>; must not match any Pantry Bot namespace (preflight.sh checks)
+#   namePrefix  - <project>-
+#   labels      - orchestrator.dev/project: <project>
+#   images      - OCIR repository of THIS project + immutable sha256 digest of the verified release
+# Render:   kubectl kustomize deploy/oci/overlays/<project>
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: orch-example-project
+namePrefix: example-project-
+
+resources:
+  - ../../base
+
+labels:
+  - pairs:
+      orchestrator.dev/project: example-project
+    includeSelectors: false # keep selectors stable (and the kube-dns selector untouched)
+
+images:
+  - name: app-image
+    newName: fra.ocir.io/TENANCY_NAMESPACE/orch/example-project/app # PLACEHOLDER
+    # PLACEHOLDER digest: replace with the digest of the verified, operator-approved release.
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

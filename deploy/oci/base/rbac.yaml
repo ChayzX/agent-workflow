@@ -1,0 +1,65 @@
+# Least-privilege, namespace-scoped RBAC for the deploy runner.
+# - Role + RoleBinding only. No ClusterRole, no ClusterRoleBinding.
+# - No wildcard verbs or resources anywhere.
+# - No access to Secrets at all (secrets arrive via External Secrets / sealed secrets).
+# - No `delete`, no pods/exec, no pods/portforward, no RBAC/quota/networkpolicy writes:
+#   deletion is a `destructive_operation` that requires operator approval and is done by
+#   a cluster administrator.
+# - Guardrail objects (NetworkPolicy, ResourceQuota, LimitRange) are read-only so the
+#   preflight script can verify they exist.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployer
+  labels:
+    orchestrator.dev/layer: guardrails
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["resourcequotas", "limitranges"]
+    verbs: ["get", "list", "watch"]
+  # Only if the External Secrets Operator is installed (recommended, see secret.template.yaml).
+  - apiGroups: ["external-secrets.io"]
+    resources: ["externalsecrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: deployer
+  labels:
+    orchestrator.dev/layer: guardrails
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: deployer
+subjects:
+  - kind: ServiceAccount
+    name: deployer
+    # Must stay `default`: kustomize's namespace transformer only rewrites ServiceAccount
+    # subjects whose namespace is `default`; it then becomes the overlay's namespace
+    # (verified with kustomize v5.4.3). Any other literal here would NOT be rewritten.
+    namespace: default

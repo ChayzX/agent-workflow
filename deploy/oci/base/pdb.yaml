@@ -1,0 +1,14 @@
+# With the default single replica this PDB permits one voluntary disruption, so it never
+# blocks node drains / cluster upgrades of a shared cluster (which would also affect other
+# tenants). For a stateless project with replicas >= 2, use `minAvailable: 1` instead.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: app
+  labels:
+    orchestrator.dev/layer: workload
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: app

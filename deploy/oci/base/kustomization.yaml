@@ -1,0 +1,33 @@
+# Base for ONE orchestrator-built project on OCI Container Engine for Kubernetes (OKE).
+# Never apply the base directly: instantiate it through an overlay that sets `namespace`,
+# `namePrefix` and the image digest (see overlays/example-project and docs/oracle.md).
+#
+# Every object carries `orchestrator.dev/layer`:
+#   guardrails - Namespace, ServiceAccounts, RBAC, NetworkPolicy, ResourceQuota, LimitRange.
+#                Applied once by a cluster administrator. The deploy runner CANNOT change them.
+#   workload   - Deployment, Service, PDB, PVC. Applied by the namespace-scoped deploy runner,
+#                only after the operator approved the `production_deploy` action.
+#
+# secret.template.yaml and registry-secret.template.yaml are deliberately NOT listed as
+# resources: they are templates and must never be rendered with real values into git.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: orch-app
+
+labels:
+  - pairs:
+      app.kubernetes.io/managed-by: agent-workflow-orchestrator
+    includeSelectors: false
+
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - rbac.yaml
+  - networkpolicy.yaml
+  - resourcequota.yaml
+  - limitrange.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - pdb.yaml
