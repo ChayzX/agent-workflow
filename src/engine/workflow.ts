@@ -934,7 +934,7 @@ export class Workflow {
           const fails = this.ctx.db.all<{ name: string; command: string; exit_code: number; output_excerpt: string }>("SELECT * FROM gate_runs WHERE project_id=? AND commit_sha=? AND status != 'pass' AND required=1 ORDER BY started_at DESC LIMIT 5", p.id, input.gateCommit ?? w!.head_commit);
           if (fails.length) parts.push('### Failing quality gates\n' + fails.map((f) => `- ${f.name} (\`${f.command}\`, exit ${f.exit_code})\n\`\`\`\n${f.output_excerpt}\n\`\`\``).join('\n'));
         }
-        if (input.conflicts?.length) parts.push(`### Merge conflicts with ${p.default_branch}\nResolve the conflict markers in: ${input.conflicts.join(', ')}. Keep both sides' intended behavior.`);
+        if (input.conflicts?.length) parts.push(`### Merge conflicts with ${p.default_branch}\nA merge of ${p.default_branch} into this branch is in progress. Edit the files to remove every conflict marker (<<<<<<<, =======, >>>>>>>) in: ${input.conflicts.join(', ')}, keeping both sides' intended behavior, and make the tests pass. Do NOT stage or commit — git is read-only for you; the supervisor completes the merge commit after you finish. Report status "completed" once the files are resolved.`);
         if (input.reason === 'ci' || w!.status_reason === 'ci') parts.push(`### CI checks failed on PR #${w!.pr_number}\nInspect the failing checks' reproduction steps locally (run the project's test commands).`);
         extra.remediation = parts.join('\n\n') || 'Re-run the quality gates and fix whatever fails.';
         break;
