@@ -116,7 +116,7 @@ test('codex adapter: real usage-limit JSONL via fake CLI → usage_limit; args i
   const args = a.buildArgs({ prompt: '', cwd: '/w', mode: 'read-only', timeoutMs: 1, env: {}, resumeSessionId: 'abc', model: 'm', effort: 'low', meta: { taskId: 't', taskKind: 'review', role: 'r', projectId: 'p', attempt: 1 } }, '/s.json', '/o.txt');
   assert.deepEqual(args.slice(-3), ['resume', 'abc', '-']);
   assert.ok(args.includes('--output-schema') && args.includes('read-only'));
-  const slow = fakeCli(d, 'codex-slow', `cat >/dev/null; echo '{"type":"thread.started","thread_id":"t9"}'; sleep 30`);
+  const slow = fakeCli(d, 'codex-slow', `if [ "$1" = login ]; then echo "Logged in using ChatGPT"; exit 0; fi; cat >/dev/null; echo '{"type":"thread.started","thread_id":"t9"}'; sleep 30`);
   const s = new CodexAdapter({ ...cfg.providers.codex!, command: slow }, new ManualClock(), {});
   const ac = new AbortController();
   const pr = s.execute({ prompt: 'x', cwd: d, mode: 'read-only', timeoutMs: 20000, env: { PATH: process.env.PATH! }, signal: ac.signal, meta: { taskId: 't', taskKind: 'review', role: 'x', projectId: 'p', attempt: 1 } });
@@ -268,4 +268,18 @@ test('capacity: success that reports a rejected window keeps the provider exhaus
   clock.advance(61_000);
   await cap.tick(new Map());
   db.close();
+});
+
+test('codex billing guard: API-key login is refused at execution time unless billing is authorized', async () => {
+  const d = tmp();
+  const bin = fakeCli(d, 'codex', 'if [ "$1" = login ]; then echo "Logged in using an API key - sk-proj-***"; exit 0; fi; cat >/dev/null; prev=""; for a in "$@"; do if [ "$prev" = "-o" ]; then echo "{}" > "$a"; fi; prev="$a"; done; echo \'{"type":"thread.started","thread_id":"t1"}\'; echo \'{"type":"turn.completed","usage":{}}\'');
+  const cfg = defaultConfig(d);
+  const meta = { taskId: 't', taskKind: 'review' as const, role: 'x', projectId: 'p', attempt: 1 };
+  const a = new CodexAdapter({ ...cfg.providers.codex!, command: bin }, new ManualClock(), { PATH: process.env.PATH! });
+  const r = await a.execute({ prompt: 'x', cwd: d, mode: 'read-only', timeoutMs: 10000, env: { PATH: process.env.PATH! }, meta });
+  assert.equal(r.failure?.cls, 'billing_policy');
+  const b = new CodexAdapter({ ...cfg.providers.codex!, command: bin, allowApiKeyBilling: true }, new ManualClock(), { PATH: process.env.PATH! });
+  const r2 = await b.execute({ prompt: 'x', cwd: d, mode: 'read-only', timeoutMs: 10000, env: { PATH: process.env.PATH! }, meta });
+  assert.notEqual(r2.failure?.cls, 'billing_policy', 'authorized billing proceeds');
+  rmSync(d, { recursive: true, force: true });
 });

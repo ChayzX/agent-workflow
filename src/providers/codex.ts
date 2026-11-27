@@ -76,7 +76,20 @@ export class CodexAdapter implements ProviderAdapter {
     return args;
   }
 
+  private authCache: { at: number; apiKey: boolean } | null = null;
+
   async execute(req: ExecRequest): Promise<ExecResult> {
+    // Execution-time billing guard: never run `codex exec` on API-key auth unless billing is authorized.
+    if (!this.cfg.allowApiKeyBilling) {
+      if (!this.authCache || this.clock.now() - this.authCache.at > 10 * 60_000) {
+        const a = await this.checkAuth().catch(() => null);
+        if (a) this.authCache = { at: this.clock.now(), apiKey: !!a.apiKeyBilling };
+      }
+      if (this.authCache?.apiKey) {
+        return { ok: false, sessionId: null, structured: null, text: '', rateLimits: [], exitCode: null, durationMs: 0,
+          failure: { cls: 'billing_policy', message: 'Codex is logged in with an API key; API billing is not authorized (providers.codex.allowApiKeyBilling)' } };
+      }
+    }
     const tmp = mkdtempSync(join(tmpdir(), 'orch-codex-'));
     const schemaPath = req.outputSchema ? join(tmp, 'schema.json') : null;
     if (schemaPath) writeFileSync(schemaPath, JSON.stringify(strictSchema(req.outputSchema!)));
