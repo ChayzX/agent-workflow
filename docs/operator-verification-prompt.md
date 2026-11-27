@@ -20,8 +20,8 @@ HawkScan and no Oracle Cloud access. Your job is to run those remaining checks a
    - Never print, log, commit or paste tokens. That covers the GitHub PAT, the dashboard token, the StackHawk key,
      and Claude or Codex logins.
    - Pass secrets through files with mode 600 or through environment variables.
-   - Before committing any log, run `grep -nE 'ghp_|github_pat_|sk-|oat|Bearer|token' <file>` on it and redact anything
-     that matches.
+   - Before committing any log, run `grep -nE 'ghp_|github_pat_|sk-ant-|sk-|Bearer |token' <file>` on it. Review each
+     match and replace any real secret value with `[REDACTED]`. Ordinary words such as "dashboard-token" can stay.
 4. **Ask me first** (and wait for a yes) before you:
    - publish a GitHub Release (step D);
    - apply anything to Oracle Cloud (step F);
