@@ -143,6 +143,8 @@ export function buildPrompt(i: PromptInput): BuiltPrompt {
   }
   const consumed = new Set(['tree', 'remediation', 'diff', 'findings', 'question', 'thread', 'decision', 'decisionKey', 'failures', 'requirements', 'merged', 'gates', 'files']);
   for (const [k, v] of Object.entries(i.extra)) if (v && !consumed.has(k)) s.push({ title: k, priority: 1, body: v });
+  const guidance = task.work_item_id ? store.checkpoints(project.id, task.work_item_id, 20).filter((c) => c.kind === 'operator_unblock') : [];
+  if (guidance.length) s.push({ title: 'Operator guidance (a human reviewed this item and unblocked it)', priority: 0, body: list(guidance.map((c) => c.summary)) });
   if (i.reconstructed) {
     const cps = store.checkpoints(project.id, task.work_item_id).map((c) => `- [${c.kind}] ${c.summary}`).join('\n');
     s.push({ title: 'Continuing work started by another session', priority: 1, body: `A previous session could not be resumed. Its checkpoints are below; the working directory may already contain partial changes — inspect \`git status\` and \`git diff\` before continuing.\n${cps || '- (no checkpoints)'}` });

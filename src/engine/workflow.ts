@@ -194,6 +194,20 @@ export class Workflow {
     this.ctx.events.emit('workitem.blocked', `${w.key} blocked: ${reason}`, { projectId: p.id, level: 'warn' });
   }
 
+  /** Operator override: return a blocked item to `ready` with a recorded note. Investigation limits restart from here. */
+  unblock(p: ProjectRow, key: string, note: string, by: string): string {
+    const w = this.store.workItemByKey(p.id, key);
+    if (!w) return `no work item ${key}`;
+    if (w.status !== 'blocked') return `${key} is ${w.status}, not blocked`;
+    if (!this.store.transition(w.id, ['blocked'], 'ready', {}, `unblocked by ${by}: ${note}`.slice(0, 500))) return 'state changed concurrently; retry';
+    for (const rk of json<string[]>(w.requirement_keys, [])) if (this.store.requirement(p.id, rk)?.status === 'blocked') this.store.setRequirementStatus(p.id, rk, 'open', [{ unblocked: w.key, by }], null);
+    this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'operator_unblock', summary: `Operator guidance: ${note}` });
+    this.ctx.events.audit(by, 'workitem.unblock', { projectId: p.id, target: w.key, detail: { note } });
+    this.ctx.events.emit('workitem.unblocked', `${w.key} unblocked by ${by}: ${note}`, { projectId: p.id });
+    if (p.status === 'blocked') this.store.setProjectStatus(p.id, 'active', `${w.key} unblocked by ${by}`);
+    return 'ok';
+  }
+
   private async startImplementation(p: ProjectRow, w: WorkItemRow): Promise<void> {
     const ws = this.ws(p);
     const base = await ws.head();
@@ -568,7 +582,7 @@ export class Workflow {
 
   private requestInvestigation(p: ProjectRow, w: WorkItemRow, why: string): void {
     if (this.investigationActive(w)) return; // single-flight
-    const n = this.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE work_item_id=? AND kind='investigate' AND status IN ('succeeded','dead')", w.id)!.n;
+    const n = this.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE work_item_id=? AND kind='investigate' AND status IN ('succeeded','dead') AND created_at > COALESCE((SELECT MAX(created_at) FROM checkpoints WHERE work_item_id=? AND kind='operator_unblock'), 0)", w.id, w.id)!.n;
     if (n >= 3) { this.block(p, w, `repeated failures after ${n} investigations: ${why}`); return; }
     this.ctx.queue.cancelForWorkItem(w.id, 'superseded by investigation');
     this.ctx.queue.enqueue({ projectId: p.id, kind: 'investigate', role: 'engineering_director', agentId: this.team.ensureAgent(p.id, 'engineering_director').id, workItemId: w.id,

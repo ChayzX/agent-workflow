@@ -330,6 +330,9 @@ export class Supervisor {
             else this.running.get(args.taskId)?.ac.abort();
             break;
           }
+          case 'unblock_item':
+            if (p) result = this.workflow.unblock(p, String(args.key), String(args.note ?? ''), c.issued_by);
+            break;
           case 'provider_reset':
             this.ctx.capacity.reset(args.provider, `operator reset by ${c.issued_by}`);
             break;

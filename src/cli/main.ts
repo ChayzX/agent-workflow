@@ -81,6 +81,7 @@ Projects
   start --goal GOAL.md --repo <owner/name|path|new> [--name N] [--mode github|local]
   status [project]                                 Verified requirement coverage, work, agents, blockers
   pause|resume|stop [project]
+  unblock ITEM [project] --note TEXT               Return a blocked work item to ready, with guidance (audited)
   tasks [project]   messages [project]   decisions [project]
   logs [--project P] [--follow] [--limit N]
   release [project] [--out DIR]                    Show / export the verified release ZIP
@@ -173,6 +174,13 @@ async function main(): Promise<number> {
         const id = resolveProject(store, c1);
         issueCommand(ctx, c0, id, {}, 'cli');
         out(`${c0} queued for ${id}${daemonPid(cfg) ? '' : ' (applies when the supervisor starts)'}`);
+        return 0;
+      }
+      case 'unblock': {
+        if (!c1 || !flags.note) throw new Error('usage: orchestrator unblock ITEM [project] --note "why it is not an external blocker / guidance"');
+        const id = resolveProject(store, c2);
+        issueCommand(ctx, 'unblock_item', id, { key: c1, note: String(flags.note) }, 'cli');
+        out(`unblock of ${c1} queued for ${id}${daemonPid(cfg) ? '' : ' (applies when the supervisor starts)'}`);
         return 0;
       }
       case 'tasks': {

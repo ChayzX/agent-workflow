@@ -415,3 +415,27 @@ test('live finding (run 2): boolean audit verdicts never duplicate a concrete de
     assert.equal(titles.filter((t) => /not reproducible|does not match implementation/.test(t)).length, 0, titles.join(', '));
   } finally { h.cleanup(); }
 });
+
+test('live finding (run 2): operator can unblock a wrongly blocked item; guidance reaches the agent; audited', async () => {
+  const base = demoBehaviour();
+  const prompts: string[] = [];
+  const h = makeHarness((req, c) => { if (req.meta.workItemKey === 'W-002') prompts.push(req.prompt); return base(req, c); });
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    let blocked = false;
+    const p = await drive(h, (x) => done(x.status), p0.id, { maxTicks: 900, onTick: () => {
+      const w = h.sup.workflow.store.workItemByKey(p0.id, 'W-002');
+      if (!blocked && w && ['ready', 'implementing'].includes(w.status)) {
+        blocked = true;
+        h.ctx.db.run("UPDATE work_items SET status='blocked', status_reason='agent claimed an external blocker' WHERE id=?", w.id);
+        h.ctx.queue.cancelForWorkItem(w.id, 'blocked');
+        issueCommand(h.ctx, 'unblock_item', p0.id, { key: 'W-002', note: 'Not an external blocker: gate results are execution evidence.' }, 'operator');
+      }
+    } });
+    assert.ok(blocked, 'item was blocked during the run');
+    assert.equal(p.status, 'completed', p.status_reason ?? '');
+    assert.ok(prompts.some((x) => x.includes('Operator guidance') && x.includes('gate results are execution evidence')), 'guidance delivered to the agent');
+    assert.ok(h.ctx.db.get("SELECT 1 FROM audit_log WHERE action='workitem.unblock'"), 'unblock is in the audit log');
+    assert.equal(h.sup.workflow.unblock(h.sup.workflow.store.project(p0.id)!, 'W-002', 'x', 'operator'), 'W-002 is done, not blocked');
+  } finally { h.cleanup(); }
+});
