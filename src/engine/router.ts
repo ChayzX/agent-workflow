@@ -83,8 +83,10 @@ export class Router {
       cands.push({ p, score, mm });
     }
     if (!cands.length) {
-      const until = this.capacity.nextChangeAt();
-      return { wait: 'no provider capacity available', until };
+      // Busy (slots full on an available provider) → stay queued; only park until a reset when no provider can run.
+      const anyUsable = enabled.some((p) => this.capacity.dispatchability(p) !== 'no');
+      if (anyUsable) return { wait: 'all usable providers are busy' };
+      return { wait: 'no provider capacity available', until: this.capacity.nextChangeAt() };
     }
     cands.sort((a, b) => b.score - a.score);
     const best = cands[0]!;
@@ -97,7 +99,7 @@ export class Router {
         return w !== null && w <= this.cfg.routing.failoverAfterMinutes * 60_000;
       });
       if (soon) return { wait: 'waiting for cross-provider reviewer capacity' };
-      return { provider: best.p, ...best.mm, resume: false, note: 'same-provider review (cross-provider unavailable)' };
+      return { provider: best.p, ...best.mm, resume: false, note: 'same provider as excluded (cross-provider unavailable)' };
     }
     const resume = !!t.session_id && t.session_provider === best.p;
     return { provider: best.p, ...best.mm, resume, note: t.provider_pinned && t.provider_pinned !== best.p ? `failover from ${t.provider_pinned}` : undefined };

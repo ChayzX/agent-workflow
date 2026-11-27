@@ -212,7 +212,11 @@ export class Workflow {
     if (head !== w.head_commit) this.store.patchWorkItem(w.id, { head_commit: head });
     const s = await runGates(this.ctx, { projectId: p.id, workItemId: w.id, scope: 'task', cwd: dir, commit: head, gates: this.store.settings(p).gates });
     if (s.passed) {
-      this.store.transition(w.id, ['gating'], 'in_review', { gated_commit: head });
+      const cur = this.store.workItem(w.id)!;
+      const blocking = this.store.findings(p.id, { workItemId: w.id, statuses: ['open', 'fixed_claimed'] }).filter((f) => isBlocking(f.severity));
+      // Approval carried over by an identical patch-id (clean update from the default branch): no re-review needed.
+      if (cur.reviewed_commit === head && !blocking.length) this.store.transition(w.id, ['gating'], 'merge_ready', { gated_commit: head }, 'gates passed; review approval carried over (identical patch)');
+      else this.store.transition(w.id, ['gating'], 'in_review', { gated_commit: head });
     } else {
       this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'gate_failure', summary: `gates failed on ${head.slice(0, 8)}: ${s.results.filter((r) => r.status !== 'pass').map((r) => r.name).join(', ')}` });
       this.toRemediation(p, w, 'gates', { gateCommit: head });

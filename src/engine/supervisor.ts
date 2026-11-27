@@ -161,7 +161,15 @@ export class Supervisor {
     }
   }
 
-  private async processOutcomes(): Promise<void> {
+  private outcomesInFlight: Promise<void> | null = null;
+  /** Single-flight: outcome handlers (git commits, transitions) must never run concurrently. */
+  private processOutcomes(): Promise<void> {
+    if (this.outcomesInFlight) return this.outcomesInFlight.then(() => this.processOutcomes());
+    this.outcomesInFlight = this.processOutcomesOnce().finally(() => { this.outcomesInFlight = null; });
+    return this.outcomesInFlight;
+  }
+
+  private async processOutcomesOnce(): Promise<void> {
     const rows = this.ctx.db.all<TaskRow>("SELECT * FROM tasks WHERE processed=0 AND status IN ('succeeded','dead','failed') ORDER BY updated_at LIMIT 50");
     for (const t of rows) {
       try {
