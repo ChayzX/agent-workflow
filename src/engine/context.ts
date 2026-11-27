@@ -123,7 +123,7 @@ export function buildPrompt(i: PromptInput): BuiltPrompt {
       s.push({ title: 'Decision record so far', priority: 1, body: i.extra.decision ?? '' });
       break;
     case 'investigate':
-      s.push({ title: `Task: root-cause investigation for ${wi?.key ?? 'project'}`, priority: 0, body: 'Repeated attempts failed. Determine the root cause from the evidence and choose a strategy: retry_same (only if the cause was transient), alternative_approach (give concrete guidance), reassign_specialist (name the role), split_task, or block (only for a genuine external blocker; describe it).' });
+      s.push({ title: `Task: root-cause investigation for ${wi?.key ?? 'project'}`, priority: 0, body: 'Repeated attempts failed. Determine the root cause from the evidence and choose a strategy: retry_same (only if the cause was transient), alternative_approach (give concrete guidance), reassign_specialist (name the role), split_task, or block (only for a genuine external blocker; describe it). Not external blockers: your own or a reviewer\'s tool permissions, being unable to run commands (the supervisor\'s gate results are execution evidence), wording of acceptance criteria (the product_manager role decides scope), or a colleague\'s answer you disagree with. A blocker needs something only a human operator can provide (credentials, hardware, payment, a legal or business decision).' });
       if (wi) s.push({ title: 'Work item', priority: 1, body: `${wi.key}: ${wi.title}\n${wi.description}\nAcceptance:\n${list(json<string[]>(wi.acceptance, []))}` });
       s.push({ title: 'Failure history', priority: 0, body: i.extra.failures ?? '' });
       break;

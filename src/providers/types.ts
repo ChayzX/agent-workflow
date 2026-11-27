@@ -49,6 +49,9 @@ export interface ExecRequest {
   onSpawn?: (pid: number) => void;
   /** Optional OS confinement applied by the supervisor; adapters pass extra scratch dirs they need writable. */
   wrap?: (cmd: string, args: string[], extraWritable: string[]) => { cmd: string; args: string[] };
+  /** True when the supervisor's OS sandbox makes the working tree and repository read-only (bubblewrap). Read-only
+   *  tasks may then run commands (tests, scripts) because writes are impossible, matching Codex `-s read-only`. */
+  osReadOnly?: boolean;
   meta: { taskId: string; taskKind: TaskKind; role: RoleId; projectId: string; workItemKey?: string | null; attempt: number; agentId?: string | null };
 }
 

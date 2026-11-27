@@ -392,3 +392,26 @@ test('live finding (run 2): auditors are told to read files; a decline with only
     }
   } finally { h.cleanup(); }
 });
+
+test('live finding (run 2): boolean audit verdicts never duplicate a concrete defect as vague work items', async () => {
+  const base = demoBehaviour();
+  let n = 0;
+  const h = makeHarness((req, c) => {
+    if (req.meta.taskKind === 'completion_audit' && n < 2) {
+      n++;
+      // Both auditors of the first audit: one concrete defect, plus the boolean verdicts it implies.
+      return { structured: { summary: 'install fails with CRLF', docs_accurate: false, install_reproducible: false, release_recommended: false,
+        defects: [{ severity: 'medium', title: 'Installation fails with CRLF line endings', description: 'README.md:12 test requires LF', paths: ['README.md'], acceptance: ['works with CRLF'] }],
+        requirements: ['R-001', 'R-002', 'R-003'].map((key) => ({ key, status: 'satisfied', evidence: 'src/calc.js:1', gap: '' })) } };
+    }
+    return base(req, c);
+  });
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    const p = await drive(h, (x) => done(x.status), p0.id, { maxTicks: 900 });
+    assert.equal(p.status, 'completed', p.status_reason ?? '');
+    const titles = h.ctx.db.all<{ title: string }>("SELECT title FROM work_items WHERE type='defect'").map((r) => r.title);
+    assert.ok(titles.includes('Installation fails with CRLF line endings'), titles.join(', '));
+    assert.equal(titles.filter((t) => /not reproducible|does not match implementation/.test(t)).length, 0, titles.join(', '));
+  } finally { h.cleanup(); }
+});

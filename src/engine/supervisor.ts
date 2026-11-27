@@ -399,6 +399,7 @@ export class Supervisor {
           if (e.kind === 'rate_limit') ctx.events.emit('provider.rate_limit_event', `${route.provider} rate-limit event`, { projectId: task.project_id, taskId: task.id, level: 'debug', data: e.data });
         },
         maxTurns: ctx.cfg.providers[route.provider]?.maxTurns,
+        osReadOnly: !!task.read_only && agentSandboxMode(ctx.cfg) === 'bwrap',
         wrap: (cmd, args, extra) => {
           // The shared repository (including this worktree's admin dir) is read-only for agents and the
           // worktree's `.git` pointer is re-bound read-only: agents edit files, the supervisor owns git.

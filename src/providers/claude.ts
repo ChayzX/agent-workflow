@@ -63,7 +63,7 @@ export class ClaudeAdapter implements ProviderAdapter {
     if (req.maxTurns ?? this.cfg.maxTurns) args.push('--max-turns', String(req.maxTurns ?? this.cfg.maxTurns));
     if (req.outputSchema) args.push('--json-schema', JSON.stringify(req.outputSchema));
     if (req.mode === 'read-only') {
-      args.push('--permission-mode', 'dontAsk', '--tools', 'Read,Grep,Glob,Bash', '--allowedTools', ...READ_ONLY_TOOLS);
+      args.push('--permission-mode', 'dontAsk', '--tools', 'Read,Grep,Glob,Bash', '--allowedTools', ...(req.osReadOnly ? ['Read', 'Grep', 'Glob', 'Bash'] : READ_ONLY_TOOLS));
     } else {
       args.push('--permission-mode', 'acceptEdits', '--allowedTools', ...WRITE_TOOLS);
     }

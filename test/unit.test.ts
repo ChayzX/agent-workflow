@@ -79,6 +79,10 @@ test('claude adapter parses real stream-json success output (fake CLI replaying 
   const bin = fakeCli(d, 'claude', `cat >/dev/null; cat ${join(FIX, 'claude-stream-success.jsonl')}`);
   const cfg = defaultConfig(d);
   const a = new ClaudeAdapter({ ...cfg.providers.claude!, command: bin }, new ManualClock(), {});
+  const enforced = a.buildArgs({ prompt: '', cwd: '/w', mode: 'read-only', osReadOnly: true, timeoutMs: 1, env: {}, meta: { taskId: 't', taskKind: 'review', role: 'r', projectId: 'p', attempt: 1 } }, 's');
+  const allowed = enforced.slice(enforced.indexOf('--allowedTools') + 1, enforced.indexOf('--disallowedTools'));
+  assert.ok(allowed.includes('Bash') && !allowed.includes('Edit') && !allowed.includes('Write'), 'OS-enforced read-only review may run commands but never edit');
+  assert.ok(enforced.includes('Bash(git push:*)'), 'always-deny list still applies');
   const r = await a.execute({ prompt: 'x', cwd: d, mode: 'read-only', timeoutMs: 10000, env: { PATH: process.env.PATH! }, outputSchema: { type: 'object' }, meta: { taskId: 't', taskKind: 'answer', role: 'x', projectId: 'p', attempt: 1 } });
   assert.equal(r.ok, true);
   assert.equal(r.sessionId, '5228d4c8-bd75-4d69-b50b-db9aff523182');

@@ -620,7 +620,6 @@ export class Workflow {
     const problems: string[] = [];
     const gaps = new Map<string, string>();
     const defects: Array<{ severity: string; title: string; description: string; paths: string[]; acceptance: string[] }> = [];
-    const vague: typeof defects = [];
     if (!result.gatesPassed) problems.push('required quality gates fail on the audited commit');
     const blockingFindings = this.store.findings(p.id, { statuses: ['open', 'fixed_claimed'] }).filter((f) => SEVERITY_RANK[f.severity] >= SEVERITY_RANK.high);
     if (blockingFindings.length) problems.push(`${blockingFindings.length} critical/high findings remain open`);
@@ -636,17 +635,17 @@ export class Workflow {
       }
       for (const d of o.defects ?? []) if (SEVERITY_RANK[d.severity as Severity] >= SEVERITY_RANK.medium) defects.push(d);
       if (!o.release_recommended) problems.push(`${t.provider} auditor does not recommend release`);
-      // Boolean verdicts without a concrete defect are not actionable on their own (see inconclusive handling below).
-      if (o.docs_accurate === false) vague.push({ severity: 'medium', title: 'Documentation does not match implementation', description: o.summary, paths: ['README.md', 'docs/'], acceptance: ['Documentation accurately describes installation and usage of the implemented system'] });
-      if (o.install_reproducible === false) vague.push({ severity: 'high', title: 'Installation is not reproducible', description: o.summary, paths: [], acceptance: ['Documented installation succeeds from a clean checkout'] });
+      // Boolean verdicts are summaries of the auditor's own defects: they never create work items themselves. A false
+      // verdict with no concrete defect is an unsupported decline (re-audited with feedback; see below).
+      const concrete = (o.defects ?? []).some((d: any) => SEVERITY_RANK[d.severity as Severity] >= SEVERITY_RANK.medium);
+      if ((o.docs_accurate === false || o.install_reproducible === false) && !concrete && o.release_recommended) problems.push(`${t.provider} auditor does not recommend release`);
     }
     for (const r of reqs.filter((x) => x.mandatory)) {
       const covered = (o: TaskRow) => (json<any>(o.output, {}).requirements ?? []).some((x: any) => x.key === r.key);
       if (succeeded.some((t) => !covered(t)) && r.status !== 'blocked') gaps.set(r.key, `${gaps.get(r.key) ?? ''} auditor omitted requirement`.trim());
     }
-    const declines = succeeded.filter((t) => !json<any>(t.output, {}).release_recommended);
+    const declines = succeeded.filter((t) => { const o = json<any>(t.output, {}); return !o.release_recommended || o.docs_accurate === false || o.install_reproducible === false; });
     const onlyDeclines = !gaps.size && !defects.length && problems.length > 0 && problems.every((x) => x.endsWith('does not recommend release') || x.startsWith('independent auditor(s) failed'));
-    if (!onlyDeclines) defects.push(...vague);
     if (onlyDeclines) {
       // A decline without a concrete unsatisfied requirement or defect is not actionable: re-audit with feedback, then escalate.
       const prev = this.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM audits WHERE project_id=? AND kind='completion' AND status='inconclusive' AND created_at > COALESCE((SELECT MAX(created_at) FROM audits WHERE project_id=? AND kind='completion' AND status IN ('failed','passed')), 0)", p.id, p.id)!.n;
