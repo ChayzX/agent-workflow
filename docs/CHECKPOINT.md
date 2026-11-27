@@ -48,3 +48,11 @@ util: validate
 ## Scheduled continuations
 - Hourly auto-resume task "Resume orchestrator build" (delete it when the mission is complete).
 - One-off at 07:12 UTC: live Codex verification after its usage reset.
+
+## Repository governance (operator instruction, 2026-11-27)
+- The operator delegated ownership of this repo to the agents: open/maintain issues, labels, epics, PRs; merge as needed.
+- Every merge requires an independent review subagent first (review the actual diff; approve or list required changes).
+  Address findings, then merge. Never merge on the implementer's own assertion.
+- Tracking: epic issue per milestone ("[Mx] …") with task sub-issues; update `status:*` labels and close tasks with evidence.
+- PR #1 (branch claude/autonomous-engineering-orchestrator-ocqm2i → main) is open; after it merges, restart the branch
+  from the latest main for the next PR.

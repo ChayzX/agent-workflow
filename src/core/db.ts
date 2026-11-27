@@ -62,9 +62,10 @@ const MIGRATIONS: string[] = [
     lease_owner TEXT, lease_expires_at INTEGER, heartbeat_at INTEGER, pid INTEGER,
     idempotency_key TEXT NOT NULL UNIQUE, input TEXT NOT NULL, output TEXT,
     error_class TEXT, error_message TEXT, session_id TEXT, session_provider TEXT, workspace_path TEXT,
-    read_only INTEGER NOT NULL DEFAULT 0, parent_task_id TEXT,
+    read_only INTEGER NOT NULL DEFAULT 0, parent_task_id TEXT, processed INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
   );
+  CREATE INDEX tasks_unprocessed ON tasks(status, processed);
   CREATE INDEX tasks_dispatch ON tasks(status, not_before, priority);
   CREATE INDEX tasks_project ON tasks(project_id, status);
 

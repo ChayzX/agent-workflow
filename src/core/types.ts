@@ -146,6 +146,7 @@ export interface TaskRow {
   workspace_path: string | null;
   read_only: number;                    // 1 => reviewer / auditor
   parent_task_id: string | null;
+  processed: number;                    // 1 once the lifecycle handler applied the outcome
   created_at: number;
   updated_at: number;
 }
