@@ -480,7 +480,7 @@ export class Workflow {
           this.store.patchWorkItem(w.id, { status_reason: `awaiting required human review on PR #${w.pr_number}` });
         } else {
           this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'merge_rejected', summary: r.reason });
-          if (this.epoch(w, 'merge_rejected') >= 3) this.block(p, w, `merge rejected 3 times: ${r.reason}`);
+          if (this.epoch(w, 'merge_rejected', true) >= 3) this.block(p, w, `merge rejected 3 times since the last operator unblock: ${r.reason}`);
           else this.store.transition(w.id, ['merging'], 'merge_ready', {}, `merge rejected: ${r.reason}`);
         }
         return;

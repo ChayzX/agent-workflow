@@ -40,6 +40,11 @@ Stated plainly so nothing is over-claimed. See `docs/acceptance-matrix.md` for w
 - **HawkScan DAST was not run in the build environment** (installing the CLI was not permitted there). A manual probe of
   authentication, CSRF, headers, input limits, traversal and throttling was run, and two issues it found were fixed.
 
+- **Operator `cancel` does not close an open pull request** (GitHub mode). Integration states (`merge_ready`, `merging`,
+  `merged`) refuse cancellation, but an item blocked while its PR was open can be cancelled. Its PR then stays open on
+  GitHub until someone closes it.
+- **The `unblock` and `cancel` commands are CLI-only.** The dashboard does not offer them.
+
 ## Product
 - The dashboard is functional and accessible-minded (semantic HTML, keyboard tabs, focus styles, `aria-live`, contrast
   tokens). It has not had a formal WCAG audit.
