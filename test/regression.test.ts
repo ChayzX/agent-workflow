@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { issueCommand } from '../src/app.js';
@@ -127,7 +127,7 @@ test('review#5: agent processes are confined — no orchestrator secrets, no sup
   mkdirSync(join(orch, 'secrets'), { recursive: true }); mkdirSync(wt, { recursive: true }); mkdirSync(join(repo, 'hooks'), { recursive: true });
   writeFileSync(join(orch, 'secrets', 'github-token'), 'ghp_SECRET');
   const cfg = defaultConfig(orch);
-  const w = wrapAgentCommand(cfg, { orchHome: orch, writable: [wt], readOnly: [repo] }, 'sh', ['-c',
+  const w = wrapAgentCommand(cfg, { orchHome: orch, provider: 'claude', writable: [wt], readOnly: [repo] }, 'sh', ['-c',
     `cat ${join(orch, 'secrets', 'github-token')} 2>/dev/null && echo LEAK; test -e /proc/${process.pid}/environ && echo SEEPROC; echo x > ${join(repo, 'hooks', 'pre-push')} 2>/dev/null && echo HOOKWRITE; echo ok > ${join(wt, 'f.txt')} && echo WROTE`]);
   const out = execFileSync(w.cmd, w.args, { encoding: 'utf8' });
   assert.doesNotMatch(out, /LEAK|SEEPROC|HOOKWRITE/);
@@ -147,5 +147,76 @@ test('review#10: supervisor lock admits exactly one live instance and recovers a
     b.acquireLock();
     assert.match(readFileSync(join(h.home, 'supervisor.lock'), 'utf8'), new RegExp(b.instanceId));
     b.releaseLock();
+  } finally { h.cleanup(); }
+});
+
+test('re-review N1: tampered worktree git metadata (.git / commondir / HEAD / filters) is repaired; supervisor git never runs agent filters', async () => {
+  const { Workspace } = await import('../src/git/git.js');
+  const base = mkdtempSync(join(tmpdir(), 'orch-gitesc-'));
+  for (const variant of ['gitdir', 'commondir', 'config']) {
+    const ws = new Workspace(join(base, variant), 'main');
+    const tampers: string[] = [];
+    ws.onTamper = (f) => tampers.push(...f);
+    await ws.ensure(null);
+    const wt = (await ws.worktree('W-001', 'orch/w-001', await ws.head())).path;
+    const marker = join(base, `${variant}-escaped`);
+    const fake = join(wt, '.cache-x');
+    execFileSync('git', ['init', '-q', '--bare', fake]);
+    writeFileSync(join(wt, '.f.sh'), `#!/bin/sh\nid -un > ${marker}\ncat\n`, { mode: 0o755 });
+    const filterCfg = `[filter "x"]\n\tclean = ${join(wt, '.f.sh')}\n`;
+    writeFileSync(join(fake, 'config'), `[core]\n\trepositoryformatversion = 0\n\tbare = false\n${filterCfg}`);
+    if (variant === 'gitdir') writeFileSync(join(wt, '.git'), `gitdir: ${fake}\n`);
+    if (variant === 'commondir') { writeFileSync(join(ws.bare, 'worktrees', 'W-001', 'commondir'), fake + '\n'); writeFileSync(join(ws.bare, 'worktrees', 'W-001', 'HEAD'), 'ref: refs/heads/main\n'); }
+    if (variant === 'config') writeFileSync(join(ws.bare, 'config'), readFileSync(join(ws.bare, 'config'), 'utf8') + filterCfg);
+    writeFileSync(join(wt, '.gitattributes'), '*.txt filter=x\n');
+    writeFileSync(join(wt, 'a.txt'), 'hello\n');
+    await ws.commitAll(wt, 'feat: x');
+    assert.equal(existsSync(marker), false, `${variant}: agent-defined filter must never execute`);
+    assert.ok(tampers.length > 0, `${variant}: tampering detected and reported`);
+    const branch = execFileSync('git', ['--git-dir', join(ws.bare, 'worktrees', 'W-001'), 'symbolic-ref', 'HEAD'], { encoding: 'utf8' }).trim();
+    assert.equal(branch, 'refs/heads/orch/w-001', `${variant}: commit landed on the task branch, never on main`);
+  }
+  rmSync(base, { recursive: true, force: true });
+});
+
+test('re-review N2: in-tree symlinks survive packaging and checksum verification', async () => {
+  const { lstatSync, readlinkSync } = await import('node:fs');
+  const { sha256 } = await import('../src/core/ids.js');
+  const b = mkdtempSync(join(tmpdir(), 'orch-ilink-'));
+  mkdirSync(join(b, 'src', 'docs'), { recursive: true });
+  writeFileSync(join(b, 'src', 'docs', 'README.md'), '# real\n');
+  symlinkSync('docs/README.md', join(b, 'src', 'README.md'));
+  const entries = collectDir(join(b, 'src'), 'pkg');
+  const manifest = entries.map((e) => ({ path: e.name.slice(4), sha256: sha256(e.data) }));
+  writeZip(join(b, 'r.zip'), entries);
+  mkdirSync(join(b, 'clean'));
+  extractZip(join(b, 'r.zip'), join(b, 'clean'));
+  const bad = manifest.filter((f) => { const fp = join(b, 'clean', 'pkg', f.path); return sha256(lstatSync(fp).isSymbolicLink() ? Buffer.from(readlinkSync(fp)) : readFileSync(fp)) !== f.sha256; });
+  assert.deepEqual(bad, []);
+  rmSync(b, { recursive: true, force: true });
+});
+
+test('re-review N4: cancelling a queued implementation does not strand the work item', async () => {
+  const h = makeHarness(demoBehaviour());
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    let cancelled = false;
+    const p = await drive(h, (x) => done(x.status), p0.id, { maxTicks: 800, onTick: () => {
+      if (cancelled) return;
+      const t = h.ctx.db.get<{ id: string }>("SELECT t.id FROM tasks t JOIN work_items w ON w.id=t.work_item_id WHERE w.key='W-003' AND t.kind='implement' AND t.status='queued'");
+      if (t) { issueCommand(h.ctx, 'cancel_task', null, { taskId: t.id }); cancelled = true; }
+    } });
+    assert.ok(cancelled);
+    assert.equal(p.status, 'completed', p.status_reason ?? '');
+  } finally { h.cleanup(); }
+});
+
+test('re-review N6: a stale lock carrying our own pid (e.g. PID 1 restart) is taken over', () => {
+  const h = makeHarness(demoBehaviour());
+  try {
+    writeFileSync(join(h.ctx.paths.home, 'supervisor.lock'), `${process.pid} sup_previous_instance`);
+    h.sup.acquireLock();
+    assert.match(readFileSync(join(h.ctx.paths.home, 'supervisor.lock'), 'utf8'), new RegExp(h.sup.instanceId));
+    h.sup.releaseLock();
   } finally { h.cleanup(); }
 });

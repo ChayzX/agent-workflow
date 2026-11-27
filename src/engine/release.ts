@@ -3,7 +3,7 @@
 // The package is then extracted into a clean directory and its documented install/build
 // procedure is executed; any failure reopens remediation.
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { json } from '../core/db.js';
@@ -121,7 +121,11 @@ export async function buildAndVerifyRelease(ctx: Ctx, store: Store, project: Pro
     extractZip(zipPath, clean);
     const root = join(clean, prefix);
     const m2 = json<typeof manifest>(readFileSync(join(root, 'RELEASE', 'manifest.json'), 'utf8'), manifest);
-    const badSums = m2.files.filter((f) => sha256(readFileSync(join(root, f.path))) !== f.sha256);
+    const badSums = m2.files.filter((f) => {
+      const fp = join(root, f.path);
+      const content = lstatSync(fp).isSymbolicLink() ? Buffer.from(readlinkSync(fp)) : readFileSync(fp);
+      return sha256(content) !== f.sha256;
+    });
     if (badSums.length) problems.push(`checksum mismatch after extraction: ${badSums.map((f) => f.path).join(', ')}`);
     const reHits = scanTree(root);
     if (reHits.length) problems.push(`secret scan of extracted package failed (${reHits.length} hits)`);

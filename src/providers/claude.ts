@@ -18,7 +18,9 @@ const ALWAYS_DENY = ['Bash(git push:*)', 'Bash(git remote:*)', 'Bash(gh:*)', 'Ba
 
 export class ClaudeAdapter implements ProviderAdapter {
   readonly id = 'claude';
-  constructor(private cfg: ProviderConfig, private clock: Clock, private baseEnv: Record<string, string>) {}
+  constructor(private cfg: ProviderConfig, private clock: Clock, private baseEnv: Record<string, string>, private quickWrap: (cmd: string, args: string[]) => { cmd: string; args: string[] } = (cmd, args) => ({ cmd, args })) {}
+
+  private quick(args: string[]) { const w = this.quickWrap(this.cfg.command, args); return runQuick(w.cmd, w.args, this.baseEnv); }
 
   capabilities(): ProviderCapabilities {
     return {
@@ -30,13 +32,13 @@ export class ClaudeAdapter implements ProviderAdapter {
   }
 
   async detect(): Promise<DetectResult> {
-    const r = await runQuick(this.cfg.command, ['--version'], this.baseEnv);
+    const r = await this.quick(['--version']);
     if (r.spawnError || r.exitCode !== 0) return { installed: false, error: r.spawnError ?? r.stderr.slice(0, 300) };
     return { installed: true, version: r.stdout.trim() };
   }
 
   async checkAuth(): Promise<AuthResult> {
-    const r = await runQuick(this.cfg.command, ['auth', 'status'], this.baseEnv);
+    const r = await this.quick(['auth', 'status']);
     if (r.spawnError) return { ok: false, detail: r.spawnError };
     try {
       const j = JSON.parse(r.stdout) as { loggedIn?: boolean; authMethod?: string; apiProvider?: string };

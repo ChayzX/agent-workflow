@@ -2,8 +2,8 @@
 // bare clone; each task gets its own worktree on its own branch, and an integration worktree
 // holds the default branch. The operator's own checkouts are never modified.
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 
 export interface GitResult { code: number; stdout: string; stderr: string }
 
@@ -44,10 +44,73 @@ export class Workspace {
   readonly bare: string;
   readonly integration: string;
   readonly wtRoot: string;
+  onTamper: (findings: string[]) => void = () => {};
   constructor(readonly root: string, readonly defaultBranch: string, private auth: () => Record<string, string> = () => ({})) {
     this.bare = join(root, 'repo.git');
     this.integration = join(root, 'integration');
     this.wtRoot = join(root, 'wt');
+  }
+
+  /** Expected branch per worktree, stored outside anything agents can write. */
+  private branchesFile(): string { return join(this.root, 'branches.json'); }
+  private expectedBranch(key: string): string | null {
+    if (key === 'integration') return this.defaultBranch;
+    try { return (JSON.parse(readFileSync(this.branchesFile(), 'utf8')) as Record<string, string>)[key] ?? null; } catch { return null; }
+  }
+  private recordBranch(key: string, branch: string): void {
+    let m: Record<string, string> = {};
+    try { m = JSON.parse(readFileSync(this.branchesFile(), 'utf8')); } catch { /* new */ }
+    m[key] = branch;
+    writeFileSync(this.branchesFile(), JSON.stringify(m), { mode: 0o600 });
+  }
+
+  private keyFor(dir: string): string | null {
+    if (dir === this.integration) return 'integration';
+    if (dir.startsWith(this.wtRoot + '/')) return basename(dir);
+    return null;
+  }
+
+  /**
+   * Agents can write inside worktrees, so worktree git metadata is never trusted: before supervisor git
+   * operations the pointer files, HEAD and config are verified (and repaired), and git runs with explicit
+   * GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR so a swapped `.git` or `commondir` is ignored.
+   */
+  async guard(dir: string): Promise<Record<string, string>> {
+    const key = this.keyFor(dir);
+    if (!key) return {};
+    const admin = join(this.bare, 'worktrees', key);
+    if (!existsSync(admin)) return {};
+    const tamper: string[] = [];
+    const dotgit = join(dir, '.git');
+    const wantPtr = `gitdir: ${admin}\n`;
+    const st = existsSync(dotgit) ? lstatSync(dotgit) : null;
+    if (!st || !st.isFile() || readFileSync(dotgit, 'utf8') !== wantPtr) {
+      if (st && !st.isFile()) rmSync(dotgit, { recursive: true, force: true });
+      writeFileSync(dotgit, wantPtr); tamper.push(`${key}: .git pointer`);
+    }
+    const fixFile = (name: string, want: string) => {
+      const f = join(admin, name);
+      const cur = existsSync(f) ? readFileSync(f, 'utf8') : null;
+      if (cur !== want && cur?.trim() !== want.trim()) { writeFileSync(f, want); tamper.push(`${key}: ${name}`); }
+    };
+    fixFile('gitdir', `${dotgit}\n`);
+    fixFile('commondir', '../..\n');
+    const branch = this.expectedBranch(key);
+    if (branch) {
+      const head = readFileSync(join(admin, 'HEAD'), 'utf8').trim();
+      if (head.startsWith('ref:') && head !== `ref: refs/heads/${branch}`) { writeFileSync(join(admin, 'HEAD'), `ref: refs/heads/${branch}\n`); tamper.push(`${key}: HEAD -> ${head}`); }
+    }
+    if (existsSync(join(admin, 'config.worktree'))) { rmSync(join(admin, 'config.worktree')); tamper.push(`${key}: config.worktree`); }
+    const removed = await this.sanitizeConfig(null);
+    tamper.push(...removed.map((k) => `repo config: ${k}`));
+    if (tamper.length) this.onTamper(tamper);
+    return { GIT_DIR: admin, GIT_WORK_TREE: dir, GIT_COMMON_DIR: this.bare };
+  }
+
+  /** Run git in a worktree with verified metadata (use this for every supervisor operation on worktrees). */
+  async gitIn(dir: string, args: string[], opts: { allowFail?: boolean; input?: string; env?: Record<string, string> } = {}): Promise<GitResult> {
+    const env = await this.guard(dir);
+    return git(dir, args, { ...opts, env: { ...env, ...opts.env } });
   }
 
   /** Clone (or initialize) the managed repository. Idempotent. */
@@ -87,7 +150,7 @@ export class Workspace {
   }
 
   async head(dir = this.integration): Promise<string> {
-    return (await git(dir, ['rev-parse', 'HEAD'])).stdout.trim();
+    return (await this.gitIn(dir, ['rev-parse', 'HEAD'])).stdout.trim();
   }
 
   wtPath(key: string): string {
@@ -103,6 +166,7 @@ export class Workspace {
     await git(this.bare, ['worktree', 'prune']);
     if (exists) await git(this.bare, ['worktree', 'add', path, branch]);
     else await git(this.bare, ['worktree', 'add', '-b', branch, path, base]);
+    this.recordBranch(key, branch);
     return { path, base, created: true };
   }
 
@@ -114,28 +178,28 @@ export class Workspace {
   }
 
   async isDirty(dir: string): Promise<boolean> {
-    return (await git(dir, ['status', '--porcelain'])).stdout.trim().length > 0;
+    return (await this.gitIn(dir, ['status', '--porcelain'])).stdout.trim().length > 0;
   }
 
   /** Commit all changes in a worktree as the orchestrator (deterministic attribution). */
   async commitAll(dir: string, message: string): Promise<string | null> {
     if (!(await this.isDirty(dir))) return null;
-    await git(dir, ['add', '-A']);
-    await git(dir, ['commit', '-m', message, '--no-verify']);
+    await this.gitIn(dir, ['add', '-A']);
+    await this.gitIn(dir, ['commit', '-m', message, '--no-verify']);
     return this.head(dir);
   }
 
   async changedFiles(dir: string, base: string, head = 'HEAD'): Promise<string[]> {
-    const r = await git(dir, ['diff', '--name-only', `${base}...${head}`], { allowFail: true });
+    const r = await this.gitIn(dir, ['diff', '--name-only', `${base}...${head}`], { allowFail: true });
     return r.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
   }
 
   /** Bounded diff for reviewers: full patch up to maxChars, then a stat summary for the rest. */
   async diff(dir: string, base: string, head: string, maxChars: number): Promise<{ text: string; truncated: boolean; files: string[] }> {
     const files = await this.changedFiles(dir, base, head);
-    const full = (await git(dir, ['diff', '--no-color', '-U3', `${base}...${head}`])).stdout;
+    const full = (await this.gitIn(dir, ['diff', '--no-color', '-U3', '--no-ext-diff', '--no-textconv', `${base}...${head}`])).stdout;
     if (full.length <= maxChars) return { text: full, truncated: false, files };
-    const stat = (await git(dir, ['diff', '--stat', `${base}...${head}`])).stdout;
+    const stat = (await this.gitIn(dir, ['diff', '--stat', `${base}...${head}`])).stdout;
     return { text: full.slice(0, maxChars - stat.length - 200) + `\n\n[... diff truncated; inspect files directly ...]\n${stat}`, truncated: true, files };
   }
 
@@ -145,28 +209,28 @@ export class Workspace {
    */
   async stageMerge(branch: string): Promise<{ ok: true } | { ok: false; conflicts: string[] }> {
     await this.recover();
-    const r = await git(this.integration, ['merge', '--no-ff', '--no-commit', branch], { allowFail: true });
+    const r = await this.gitIn(this.integration, ['merge', '--no-ff', '--no-commit', branch], { allowFail: true });
     if (r.code === 0) return { ok: true };
-    const conflicts = (await git(this.integration, ['diff', '--name-only', '--diff-filter=U'], { allowFail: true })).stdout.split('\n').filter(Boolean);
-    await git(this.integration, ['merge', '--abort'], { allowFail: true });
+    const conflicts = (await this.gitIn(this.integration, ['diff', '--name-only', '--diff-filter=U'], { allowFail: true })).stdout.split('\n').filter(Boolean);
+    await this.gitIn(this.integration, ['merge', '--abort'], { allowFail: true });
     return { ok: false, conflicts };
   }
 
   async commitMerge(message: string): Promise<string> {
-    await git(this.integration, ['commit', '--no-verify', '-m', message]);
+    await this.gitIn(this.integration, ['commit', '--no-verify', '-m', message]);
     return this.head();
   }
 
   async abortMerge(): Promise<void> {
-    await git(this.integration, ['merge', '--abort'], { allowFail: true });
-    await git(this.integration, ['reset', '--hard', 'HEAD'], { allowFail: true });
+    await this.gitIn(this.integration, ['merge', '--abort'], { allowFail: true });
+    await this.gitIn(this.integration, ['reset', '--hard', 'HEAD'], { allowFail: true });
   }
 
   /** Bring the default branch into a task branch; leaves conflict markers for an agent to resolve. */
   async mergeDefaultInto(dir: string): Promise<{ ok: boolean; conflicts: string[] }> {
-    const r = await git(dir, ['merge', '--no-edit', this.defaultBranch], { allowFail: true });
+    const r = await this.gitIn(dir, ['merge', '--no-edit', this.defaultBranch], { allowFail: true });
     if (r.code === 0) return { ok: true, conflicts: [] };
-    const conflicts = (await git(dir, ['diff', '--name-only', '--diff-filter=U'], { allowFail: true })).stdout.split('\n').filter(Boolean);
+    const conflicts = (await this.gitIn(dir, ['diff', '--name-only', '--diff-filter=U'], { allowFail: true })).stdout.split('\n').filter(Boolean);
     return { ok: false, conflicts };
   }
 
@@ -199,7 +263,7 @@ export class Workspace {
   /** After a remote (PR) merge: fast-forward the integration worktree to the remote default branch. */
   async syncDefaultFromRemote(): Promise<string> {
     await this.fetch();
-    await git(this.integration, ['reset', '--hard', `origin/${this.defaultBranch}`]);
+    await this.gitIn(this.integration, ['reset', '--hard', `origin/${this.defaultBranch}`]);
     return this.head();
   }
 

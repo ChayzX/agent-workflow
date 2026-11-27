@@ -54,6 +54,12 @@ export function findBwrap(): string | null {
   return bwrapCache;
 }
 
+/** TLS trust files referenced by the network environment (e.g. a corporate proxy CA) must stay readable. */
+function trustPaths(): string[] {
+  return ['NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'GIT_SSL_CAINFO', 'CURL_CA_BUNDLE']
+    .map((k) => process.env[k]).filter((p): p is string => !!p && p.startsWith('/') && existsSync(p));
+}
+
 export interface SandboxSpec {
   cwd: string;
   writable: string[];          // only these paths are writable
@@ -80,6 +86,7 @@ export function wrapCommand(cfg: Config, spec: SandboxSpec, command: string): { 
   const under = (p: string) => hidden.some((h) => p === h || p.startsWith(h + '/'));
   const tool = [dirname(dirname(process.execPath)), ...(process.env.PATH ?? '').split(':')].filter((p) => p && p.startsWith('/') && existsSync(p) && under(p) && !/\.(codex|claude|ssh|gnupg|config|aws|kube)\b/.test(p));
   for (const t of [...new Set(tool)]) args.push('--ro-bind', t, t);
+  if (spec.network) for (const t of trustPaths()) if (under(t)) args.push('--ro-bind', t, t);
   for (const w of spec.writable) args.push('--bind', w, w);
   args.push('--chdir', spec.cwd, 'sh', '-c', command);
   return { cmd: findBwrap()!, args, mode };
@@ -93,9 +100,20 @@ export async function runSandboxed(cfg: Config, spec: SandboxSpec, command: stri
 
 export interface AgentSandboxSpec {
   orchHome: string;
-  writable: string[];      // worktree (+ its git index dir) and adapter scratch dirs
-  readOnly: string[];      // e.g. the shared bare repository (objects/refs) for read-only git use
+  provider: string;        // only this provider's own session/config directories are exposed
+  writable: string[];      // worktree and adapter scratch dirs
+  readOnly: string[];      // e.g. the shared bare repository (objects/refs/worktree admin dirs)
+  readOnlyLast?: string[]; // re-bound read-only on top of writable dirs (e.g. the worktree's `.git` pointer)
 }
+
+/**
+ * Providers whose authentication depends on files outside the service user's home (some managed hosts keep
+ * credentials under another account in /home). For these, other users' homes are left visible; the service
+ * user's home and ORCH_HOME stay hidden. Decided by a startup self-check, never by configuration from agents.
+ */
+const relaxedProviders = new Set<string>();
+export function relaxAgentSandbox(provider: string, on = true): void { if (on) relaxedProviders.add(provider); else relaxedProviders.delete(provider); }
+export function agentSandboxRelaxed(provider: string): boolean { return relaxedProviders.has(provider); }
 
 export function agentSandboxMode(cfg: Config): 'bwrap' | 'none' {
   const m = cfg.security.agentSandbox ?? 'auto';
@@ -114,18 +132,32 @@ export function wrapAgentCommand(cfg: Config, spec: AgentSandboxSpec, cmd: strin
   if (agentSandboxMode(cfg) === 'none') return { cmd, args };
   const home = homedir();
   const a = ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp', '--die-with-parent', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--share-net'];
-  const hidden = [...new Set(['/root', '/home', home, spec.orchHome])].filter((h) => existsSync(h));
+  const hidden = [...new Set([...(relaxedProviders.has(spec.provider) ? [] : ['/root', '/home']), home, spec.orchHome])].filter((h) => existsSync(h));
   for (const h of hidden) a.push('--tmpfs', h);
   const under = (p: string) => hidden.some((h) => p === h || p.startsWith(h + '/'));
   // Toolchains (e.g. nvm-installed node/claude/codex) read-only.
   const tool = [dirname(dirname(process.execPath)), ...(process.env.PATH ?? '').split(':')].filter((p) => p && p.startsWith('/') && existsSync(p) && under(p) && !/\.(codex|claude|ssh|gnupg|aws|kube|config\/gh)\b/.test(p));
   for (const t of [...new Set(tool)]) a.push('--ro-bind', t, t);
-  // Provider session/config directories and package caches read-write (they hold the CLI's own login).
-  const providerPaths = ['.claude', '.claude.json', '.codex', '.config/claude', '.npm', '.cache', '.local/share/claude', '.local/state/claude']
-    .map((p) => join(home, p)).concat([process.env.CLAUDE_CONFIG_DIR, process.env.CODEX_HOME].filter((x): x is string => !!x));
+  for (const t of trustPaths()) if (under(t)) a.push('--ro-bind', t, t);
+  // Only the running provider's own session/config directories are writable (they hold its login); its
+  // settings/config/hook files are re-bound read-only so an agent cannot plant commands the supervisor's own
+  // CLI calls would later read. The other provider's directories stay hidden with the rest of the home.
+  const own: Record<string, string[]> = {
+    claude: ['.claude', '.claude.json', '.config/claude', '.local/share/claude', '.local/state/claude'],
+    codex: ['.codex'],
+  };
+  const providerPaths = (own[spec.provider] ?? []).map((p) => join(home, p))
+    .concat(spec.provider === 'claude' && process.env.CLAUDE_CONFIG_DIR ? [process.env.CLAUDE_CONFIG_DIR] : [])
+    .concat(spec.provider === 'codex' && process.env.CODEX_HOME ? [process.env.CODEX_HOME] : [])
+    .concat(['.npm', '.cache'].map((p) => join(home, p)));
   for (const p of [...new Set(providerPaths)]) if (existsSync(p)) a.push('--bind', p, p);
+  const protectedFiles = spec.provider === 'claude'
+    ? ['settings.json', 'settings.local.json', 'hooks', 'plugins', 'agents', 'commands', 'CLAUDE.md'].map((f) => join(home, '.claude', f))
+    : ['config.toml', 'hooks.json', 'rules', 'AGENTS.md', 'plugins', 'skills'].map((f) => join(process.env.CODEX_HOME ?? join(home, '.codex'), f));
+  for (const f of protectedFiles) if (existsSync(f)) a.push('--ro-bind', f, f);
   for (const r of spec.readOnly) if (existsSync(r)) a.push('--ro-bind', r, r);
   for (const w of spec.writable) if (existsSync(w)) a.push('--bind', w, w);
+  for (const r of spec.readOnlyLast ?? []) if (existsSync(r)) a.push('--ro-bind', r, r);
   a.push('--', cmd, ...args);
   return { cmd: findBwrap()!, args: a };
 }

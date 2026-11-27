@@ -44,7 +44,12 @@ export class Workflow {
   setTokenProvider(fn: () => string | null): void { this.tokenProvider = fn; }
 
   ws(p: ProjectRow): Workspace {
-    return new Workspace(p.workspace_dir, p.default_branch, () => (p.repo_mode === 'github' ? authEnv(this.tokenProvider()) : {}));
+    const ws = new Workspace(p.workspace_dir, p.default_branch, () => (p.repo_mode === 'github' ? authEnv(this.tokenProvider()) : {}));
+    ws.onTamper = (f) => {
+      this.ctx.events.emit('security.git_tamper', `repaired untrusted git metadata: ${f.join('; ')}`.slice(0, 1000), { projectId: p.id, level: 'error' });
+      this.ctx.events.audit('supervisor', 'security.git_tamper', { projectId: p.id, detail: { repaired: f } });
+    };
+    return ws;
   }
 
   // ---------------------------------------------------------------- jobs
@@ -196,9 +201,9 @@ export class Workflow {
   /** An item stuck in implementing with no live task (e.g. task cancelled by an operator) gets a new attempt. */
   private repairStalled(p: ProjectRow, w: WorkItemRow): void {
     if (this.ctx.queue.activeForWorkItem(w.id).length || this.jobs.has(`start:${w.id}`)) return;
-    const last = this.ctx.db.get<TaskRow>("SELECT * FROM tasks WHERE work_item_id=? AND kind IN ('implement','investigate','remediate') ORDER BY created_at DESC LIMIT 1", w.id);
-    if (last && (last.processed === 0 || ['succeeded'].includes(last.status) && last.kind !== 'implement')) return;
-    if (last?.status === 'succeeded') return;
+    const last = this.ctx.db.get<TaskRow>("SELECT * FROM tasks WHERE work_item_id=? AND kind IN ('implement','investigate','remediate') ORDER BY created_at DESC, rowid DESC LIMIT 1", w.id);
+    // Wait while an outcome handler is still pending; a cancelled task is terminal and gets replaced.
+    if (last && last.status !== 'cancelled' && !last.processed) return;
     const n = this.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE work_item_id=? AND kind='implement'", w.id)!.n;
     if (n >= 4) { this.requestInvestigation(p, w, 'implementation attempts exhausted'); return; }
     this.ctx.queue.enqueue({ projectId: p.id, kind: 'implement', role: w.role, agentId: w.implementer_agent_id ?? this.team.ensureAgent(p.id, w.role).id, workItemId: w.id,
@@ -264,7 +269,7 @@ export class Workflow {
   private ensureRemediation(p: ProjectRow, w: WorkItemRow): void {
     if (this.investigationActive(w)) return;
     if (this.ctx.queue.activeForWorkItem(w.id).some((t) => t.kind === 'remediate')) return;
-    if (w.status_reason?.startsWith('investigating')) return;
+    if (w.status_reason?.startsWith('investigating')) { this.requestInvestigation(p, w, w.status_reason.replace(/^investigating:\s*/, '')); return; }
     const ck = this.store.checkpoints(p.id, w.id, 20).filter((c) => c.kind === 'remediation').at(-1);
     const data = json<Record<string, unknown>>(ck?.data, {});
     // After two rounds with the same agent, bring in a different agent (and preferably provider).
@@ -349,14 +354,14 @@ export class Workflow {
 
     const dir = ws.wtPath(w.key);
     // Nothing to integrate (e.g. a defect verified as already resolved): record the current default branch as the result.
-    if ((await git(dir, ['merge-base', '--is-ancestor', w.head_commit, p.default_branch], { allowFail: true })).code === 0) {
+    if ((await ws.gitIn(dir, ['merge-base', '--is-ancestor', w.head_commit, p.default_branch], { allowFail: true })).code === 0) {
       const main = await ws.head();
       this.store.transition(w.id, ['merge_ready'], 'merged', { merged_commit: main }, 'no changes to integrate (verified no-op)');
       return;
     }
     // Bring the default branch into the task branch first so the merged result is what was verified.
     const before = await ws.head(dir);
-    const patchBefore = await patchId(dir, p.default_branch, before);
+    const patchBefore = await patchId(ws, dir, p.default_branch, before);
     const m = await ws.mergeDefaultInto(dir);
     if (!m.ok) {
       this.toRemediation(p, w, 'conflicts', { conflicts: m.conflicts });
@@ -364,7 +369,7 @@ export class Workflow {
     }
     const after = await ws.head(dir);
     if (after !== before) {
-      const patchAfter = await patchId(dir, p.default_branch, after);
+      const patchAfter = await patchId(ws, dir, p.default_branch, after);
       // A clean merge that leaves the item's own diff unchanged keeps the review approval; gates re-run.
       const carry = patchBefore && patchBefore === patchAfter ? { reviewed_commit: after } : {};
       this.store.transition(w.id, ['merge_ready'], 'gating', { head_commit: after, gated_commit: null, ...carry }, 'updated with default branch; re-running gates');
@@ -388,7 +393,7 @@ export class Workflow {
     const mergeSha = await ws.commitMerge(`Merge ${w.key}: ${w.title}`);
     const s = await runGates(this.ctx, { projectId: p.id, workItemId: w.id, scope: 'merge', cwd: ws.integration, commit: mergeSha, gates: this.store.settings(p).gates });
     if (!s.passed) {
-      await git(ws.integration, ['reset', '--hard', prevMain]);
+      await ws.gitIn(ws.integration, ['reset', '--hard', prevMain]);
       this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'merge_gate_failure', summary: `merge verification failed: ${s.results.filter((r) => r.status !== 'pass').map((r) => r.name).join(', ')}` });
       this.toRemediation(p, w, 'merge_gates', { gateCommit: mergeSha });
       return;
@@ -428,13 +433,21 @@ export class Workflow {
       this.store.transition(w.id, ['merging'], 'merged', { merged_commit: r.sha });
       this.ctx.events.audit('supervisor', 'github.merge', { projectId: p.id, target: `PR#${w.pr_number}`, detail: { sha: w.head_commit, merge: r.sha } });
     }
+    // Post-merge sync and gates happen in finalize(), which retries until they succeed.
+  }
+
+  /** GitHub mode: the local default branch must match the remote and pass gates before an item is done. */
+  private async postMergeVerify(p: ProjectRow, w: WorkItemRow): Promise<void> {
+    if (this.epoch(w, 'post_merge_verified') > 0) return;
     const ws = this.ws(p);
-    const main = await ws.syncDefaultFromRemote();
+    const main = await ws.syncDefaultFromRemote(); // throws → job error → retried next tick (item stays merged)
     const s = await runGates(this.ctx, { projectId: p.id, workItemId: w.id, scope: 'post-merge', cwd: ws.integration, commit: main, gates: this.store.settings(p).gates });
     if (!s.passed) this.createDefect(p, { title: `Default branch fails quality gates after merging ${w.key}`, description: failedGateText(s), severity: 'high', paths: json(w.paths, []), source: 'post-merge-gates', acceptance: ['All required quality gates pass on the default branch'] });
+    this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'post_merge_verified', summary: `default branch synced to ${main.slice(0, 8)}; gates ${s.passed ? 'pass' : 'FAIL (defect opened)'}` });
   }
 
   private async finalize(p: ProjectRow, w: WorkItemRow): Promise<void> {
+    if (p.repo_mode === 'github') await this.postMergeVerify(p, w);
     const evidence = gateEvidence(this.ctx, p.id, w.merged_commit ?? '').map((g) => `${g.name}=${g.status}`).join(',');
     for (const rk of json<string[]>(w.requirement_keys, [])) {
       const all = this.store.workItems(p.id).filter((x) => json<string[]>(x.requirement_keys, []).includes(rk) && x.status !== 'cancelled');
@@ -553,6 +566,7 @@ export class Workflow {
     if (audit.status === 'pending') {
       this.job(`audit-gates:${audit.id}`, p.id, async () => {
         const ws = this.ws(p);
+        if (p.repo_mode === 'github') await ws.syncDefaultFromRemote();
         const head = await ws.head();
         const s = await runGates(this.ctx, { projectId: p.id, workItemId: null, scope: 'audit', cwd: ws.integration, commit: head, gates: this.store.settings(p).gates });
         this.ctx.db.run("UPDATE audits SET status='running', commit_sha=?, result=?, updated_at=? WHERE id=?", head, JSON.stringify({ gatesPassed: s.passed }), this.ctx.clock.now(), audit.id);
@@ -807,8 +821,8 @@ export class Workflow {
     mkdirSync(dir, { recursive: true });
     const path = join(dir, `${d.key}.md`);
     writeFileSync(path, content);
-    await git(ws.integration, ['add', path]);
-    await git(ws.integration, ['commit', '--no-verify', '-m', `docs(adr): ${d.key} ${d.title}`], { allowFail: true });
+    await ws.gitIn(ws.integration, ['add', path]);
+    await ws.gitIn(ws.integration, ['commit', '--no-verify', '-m', `docs(adr): ${d.key} ${d.title}`], { allowFail: true });
     this.ctx.db.run('UPDATE decisions SET adr_path=? WHERE id=?', `docs/adr/${d.key}.md`, d.id);
   }
 
@@ -976,10 +990,10 @@ function guessRole(paths: string[]): string {
   return 'backend_engineer';
 }
 
-async function patchId(dir: string, base: string, head: string): Promise<string | null> {
-  const d = await git(dir, ['diff', `${base}...${head}`], { allowFail: true });
+async function patchId(ws: Workspace, dir: string, base: string, head: string): Promise<string | null> {
+  const d = await ws.gitIn(dir, ['diff', '--no-ext-diff', '--no-textconv', `${base}...${head}`], { allowFail: true });
   if (d.code !== 0 || !d.stdout) return null;
-  const r = await git(dir, ['patch-id', '--stable'], { allowFail: true, input: d.stdout });
+  const r = await ws.gitIn(dir, ['patch-id', '--stable'], { allowFail: true, input: d.stdout });
   return r.stdout.split(' ')[0] || null;
 }
 

@@ -9,7 +9,7 @@ import { newId, randomToken } from '../core/ids.js';
 import type { ExecFailure, ExecResult } from '../providers/types.js';
 import { killTree } from '../providers/process.js';
 import type { FailureClass, ProjectRow, TaskRow } from '../core/types.js';
-import { agentEnv, wrapAgentCommand } from '../security/sandbox.js';
+import { agentEnv, agentSandboxMode, relaxAgentSandbox, wrapAgentCommand } from '../security/sandbox.js';
 import { validate } from '../util/validate.js';
 import { buildPrompt } from './context.js';
 import type { Ctx } from './ctx.js';
@@ -18,6 +18,8 @@ import { schemaFor } from './schemas.js';
 import { Workflow } from './workflow.js';
 
 const RUNNABLE_PROJECT = ['planning', 'debating', 'active', 'auditing', 'releasing'];
+/** Lock contents held by live Supervisor instances in this process (a same-pid lock not in here is stale). */
+const LIVE_LOCKS = new Set<string>();
 
 export interface SupervisorOptions { onIdle?: () => void; lock?: boolean }
 
@@ -58,19 +60,22 @@ export class Supervisor {
           let content = '';
           try { content = readFileSync(this.lockPath, 'utf8'); } catch { continue; }
           const pid = Number(content.split(' ')[0]);
-          if (pid && isAlive(pid) && content !== mine) throw new Error(`another supervisor is running (pid ${pid}); refusing to start a second one`);
+          const held = pid === process.pid ? LIVE_LOCKS.has(content) : pid > 0 && isAlive(pid);
+          if (held) throw new Error(`another supervisor is running (pid ${pid}); refusing to start a second one`);
           // Stale: remove only if unchanged since we read it (another starter may have replaced it).
           try { if (readFileSync(this.lockPath, 'utf8') === content) unlinkSync(this.lockPath); } catch { /* raced */ }
           if (attempt === 2) throw new Error('could not acquire supervisor lock');
         }
       }
       if (readFileSync(this.lockPath, 'utf8') !== mine) throw new Error('supervisor lock was taken by another instance');
+      LIVE_LOCKS.add(mine);
     } finally {
       try { unlinkSync(tmp); } catch { /* gone */ }
     }
   }
 
   releaseLock(): void {
+    LIVE_LOCKS.delete(`${process.pid} ${this.instanceId}`);
     try { if (readFileSync(this.lockPath, 'utf8').includes(this.instanceId)) unlinkSync(this.lockPath); } catch { /* gone */ }
   }
 
@@ -93,8 +98,28 @@ export class Supervisor {
     return { requeued, killed, gitFixes };
   }
 
+  /** Verify each provider still authenticates inside the agent sandbox; relax (audited) only when required. */
+  async sandboxSelfCheck(): Promise<void> {
+    if (agentSandboxMode(this.ctx.cfg) !== 'bwrap') {
+      this.ctx.events.emit('security.sandbox', 'agent sandbox unavailable (no bubblewrap): agents run with a scrubbed environment only', { level: 'warn' });
+      return;
+    }
+    for (const [id, a] of this.ctx.adapters) {
+      if (id !== 'claude' && id !== 'codex') continue;
+      const strict = await a.checkAuth().catch(() => ({ ok: false }));
+      if (strict.ok) continue;
+      relaxAgentSandbox(id, true);
+      const relaxed = await a.checkAuth().catch(() => ({ ok: false }));
+      if (relaxed.ok) {
+        this.ctx.events.emit('security.sandbox_relaxed', `${id}: authentication depends on files outside the service user's home; other accounts' homes stay visible to ${id} agents (ORCH_HOME and the service home remain hidden)`, { level: 'warn' });
+        this.ctx.events.audit('supervisor', 'security.sandbox_relaxed', { detail: { provider: id } });
+      } else relaxAgentSandbox(id, false); // genuinely not logged in: keep strict confinement
+    }
+  }
+
   async start(): Promise<void> {
     if (this.opts.lock !== false) this.acquireLock();
+    await this.sandboxSelfCheck();
     await this.recover();
     this.ctx.events.audit('supervisor', 'supervisor.start', { detail: { instance: this.instanceId } });
     this.ctx.log.info('supervisor started', { instance: this.instanceId });
@@ -349,10 +374,15 @@ export class Supervisor {
         },
         maxTurns: ctx.cfg.providers[route.provider]?.maxTurns,
         wrap: (cmd, args, extra) => {
-          // The worktree's git dir (index etc.) is writable; the shared repository is read-only for agents.
+          // The shared repository (including this worktree's admin dir) is read-only for agents and the
+          // worktree's `.git` pointer is re-bound read-only: agents edit files, the supervisor owns git.
           const repoGit = join(project.workspace_dir, 'repo.git');
-          const gitDir = cwd.startsWith(join(project.workspace_dir, 'wt')) ? join(repoGit, 'worktrees', cwd.split('/').pop()!) : null;
-          return wrapAgentCommand(ctx.cfg, { orchHome: ctx.paths.home, writable: [...(task.read_only ? [] : [cwd]), ...(gitDir ? [gitDir] : []), ...extra], readOnly: [repoGit, ...(task.read_only ? [cwd] : [])] }, cmd, args);
+          return wrapAgentCommand(ctx.cfg, {
+            orchHome: ctx.paths.home, provider: route.provider,
+            writable: [...(task.read_only ? [] : [cwd]), ...extra],
+            readOnly: [repoGit, ...(task.read_only ? [cwd] : [])],
+            readOnlyLast: [join(cwd, '.git')],
+          }, cmd, args);
         },
         meta: { taskId: task.id, taskKind: task.kind, role: task.role, projectId: task.project_id, workItemKey: task.work_item_id ? this.workflow.store.workItem(task.work_item_id)?.key : null, attempt: task.attempts, agentId: task.agent_id },
       });

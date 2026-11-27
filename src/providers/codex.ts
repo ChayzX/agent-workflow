@@ -16,7 +16,9 @@ import type {
 
 export class CodexAdapter implements ProviderAdapter {
   readonly id = 'codex';
-  constructor(private cfg: ProviderConfig, private clock: Clock, private baseEnv: Record<string, string>) {}
+  constructor(private cfg: ProviderConfig, private clock: Clock, private baseEnv: Record<string, string>, private quickWrap: (cmd: string, args: string[]) => { cmd: string; args: string[] } = (cmd, args) => ({ cmd, args })) {}
+
+  private quick(args: string[]) { const w = this.quickWrap(this.cfg.command, args); return runQuick(w.cmd, w.args, this.baseEnv); }
 
   capabilities(): ProviderCapabilities {
     return {
@@ -28,13 +30,13 @@ export class CodexAdapter implements ProviderAdapter {
   }
 
   async detect(): Promise<DetectResult> {
-    const r = await runQuick(this.cfg.command, ['--version'], this.baseEnv);
+    const r = await this.quick(['--version']);
     if (r.spawnError || r.exitCode !== 0) return { installed: false, error: r.spawnError ?? r.stderr.slice(0, 300) };
     return { installed: true, version: r.stdout.trim() };
   }
 
   async checkAuth(): Promise<AuthResult> {
-    const r = await runQuick(this.cfg.command, ['login', 'status'], this.baseEnv);
+    const r = await this.quick(['login', 'status']);
     if (r.spawnError) return { ok: false, detail: r.spawnError };
     const out = (r.stdout + r.stderr).trim();
     const ok = r.exitCode === 0 && /logged in/i.test(out) && !/not logged in/i.test(out);
@@ -44,7 +46,8 @@ export class CodexAdapter implements ProviderAdapter {
 
   /** Non-model capacity probe via the app-server JSON-RPC protocol. */
   async probeCapacity(): Promise<CapacityProbe | null> {
-    const rpc = new AppServerClient(this.cfg.command, this.baseEnv);
+    const w = this.quickWrap(this.cfg.command, ['app-server']);
+    const rpc = new AppServerClient(w.cmd, this.baseEnv, 15_000, w.args);
     try {
       await rpc.start();
       await rpc.request('initialize', { clientInfo: { name: 'agent-workflow-orchestrator', title: null, version: '0.1.0' }, capabilities: null });
@@ -211,11 +214,11 @@ export class AppServerClient {
   private nextId = 1;
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private buf = '';
-  constructor(private command: string, private env: Record<string, string>, private timeoutMs = 15_000) {}
+  constructor(private command: string, private env: Record<string, string>, private timeoutMs = 15_000, private argv: string[] = ['app-server']) {}
 
   start(): Promise<void> {
     return new Promise((res, rej) => {
-      this.child = spawn(this.command, ['app-server'], { env: this.env, stdio: ['pipe', 'pipe', 'ignore'], detached: true });
+      this.child = spawn(this.command, this.argv, { env: this.env, stdio: ['pipe', 'pipe', 'ignore'], detached: true });
       this.child.on('error', (e) => rej(e));
       this.child.on('spawn', () => res());
       this.child.stdout!.setEncoding('utf8');
