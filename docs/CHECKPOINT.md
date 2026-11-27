@@ -6,8 +6,8 @@ milestone boundary. Scheduled auto-resume reads "Next executable actions".
 ## Current milestone (updated 2026-11-27 16:20 UTC)
 - PR #61 merged into main (93ce394) at the independently approved commit 6a50a01. The first review returned
   REQUEST_CHANGES; every finding was addressed, then the same reviewer approved.
-- `npm test` 56/56. Release `release/agent-workflow-orchestrator-0.1.0.zip` (sha256 fe3dd991…) matches the merged code
-  and was clean-room verified.
+- `npm test` 56/56. Release `release/agent-workflow-orchestrator-0.1.0.zip` (sha256 fe3dd991…) is built from 93ce394
+  (the PR #61 merge) and was clean-room verified. Later follow-ups (PR #62) are not in the 0.1.0 ZIP.
 - Live evidence: wordfreq (Claude) and greet (Claude + Codex), both with verified releases.
 - GitHub tracking:
   - Closed with evidence: #17, #19 and epic #3 (M2); #36, #37 and epic #7 (M6); #56, #57 and #60 (acceptance B, C, F).
