@@ -1,0 +1,21 @@
+{
+  "name": "agent-workflow-orchestrator",
+  "version": "0.1.0",
+  "description": "Autonomous engineering orchestrator: turns a natural-language goal into a reviewed, tested, packaged product using Codex and Claude Code agents.",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "engines": { "node": ">=22.13.0" },
+  "bin": { "orchestrator": "bin/orchestrator" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --disable-warning=ExperimentalWarning --test --test-concurrency=4 dist/test/",
+    "lint": "tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters",
+    "package": "npm run build && node --disable-warning=ExperimentalWarning dist/src/cli/main.js self-package"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.3",
+    "typescript": "5.8.3"
+  }
+}
