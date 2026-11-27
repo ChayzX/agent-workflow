@@ -141,5 +141,19 @@ orchestrator doctor
 
 ## Status
 
-See `docs/acceptance-matrix.md`. Items are marked **verified-live**, **verified-simulated** (deterministic tests with
-simulated providers and real git/gates), or **unverified** (needs credentials this build environment did not have).
+**v0.1.0.** The build was merged after five rounds of independent agent code review, which found 24 defects, all fixed
+with regression tests. `npm test` passes 45 of 45.
+
+- **Verified live:**
+  - A complete product, `wordfreq`, built autonomously from one goal by real Claude agents. Verified release:
+    `docs/evidence/wordfreq-live/`.
+  - Codex usage-limit detection with provider-reported reset times.
+  - Real Claude limit exhaustion with both providers out, followed by staggered recovery.
+  - Graceful restart.
+  - Confined agent sandbox.
+- **Verified with simulated providers:** cross-provider failover, crash and kill recovery, duplicate prevention,
+  debates, defect remediation.
+- **Pending live verification:** dual-provider collaboration (scheduled), GitHub mode against the live API (needs an
+  operator PAT), systemd on a real host, HAWK DAST, OCI deployment.
+
+Details: `docs/acceptance-matrix.md`.
