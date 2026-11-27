@@ -49,6 +49,17 @@ These require an operator approval (`orchestrator approvals`, or the dashboard):
   - Writable: only their worktree, its git index directory, and the provider's own session and cache directories.
   - Network: kept.
   - **Without bubblewrap**, agents run as the service user with a scrubbed environment, so a malicious agent could read files that user can read. In that case use the dedicated service account and the hardened unit, or install bubblewrap (`doctor` warns).
+- **Worktree git metadata is never trusted.** Before every supervisor git operation on a worktree, the `.git` pointer,
+  `gitdir`, `commondir` and `HEAD` are verified against values the supervisor recorded outside agent reach. Mismatches
+  are repaired and audited as `security.git_tamper`. Git then runs with explicit `GIT_DIR`/`GIT_WORK_TREE`/
+  `GIT_COMMON_DIR`; diffs use `--no-ext-diff --no-textconv`.
+- **Agents see only their own provider's session directories.** Those providers' settings, hook and config files are
+  read-only to agents. Supervisor-side CLI calls (version, auth status, the Codex app-server probe) run in the same
+  confinement.
+- **A startup self-check verifies each provider authenticates inside the sandbox.** If authentication only works when
+  other accounts' homes are visible, as on managed hosts that keep the login elsewhere, that single aspect is relaxed for
+  that provider and recorded as an audited `security.sandbox_relaxed` warning. `$ORCH_HOME` and the service user's home
+  stay hidden in all cases.
 - **Supervisor git operations** run with hooks disabled (`core.hooksPath=/dev/null`), `fsmonitor` off and `ext::` transport disabled. The shared repository config is reduced to an allowlist before every fetch and push, so agents cannot redirect authenticated pushes (`url.*.insteadOf`, `http.*`, `include.*`, credential helpers).
 - **Without bubblewrap**, gate commands also run unsandboxed (`doctor` warns about this).
 - **The dashboard has a single operator role.** There are no per-user accounts.

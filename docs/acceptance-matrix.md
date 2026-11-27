@@ -7,7 +7,7 @@ How to read the Status column:
 - **⏳ pending:** a live run is scheduled or needs operator credentials. The procedure is in `docs/live-acceptance.md`.
 - **❌:** not done.
 
-Automated suite: `npm test` passes 36 of 36 (`test/unit`, `github`, `web`, `e2e`, `recovery`, `regression`).
+Automated suite: `npm test` passes 40 of 40 (`test/unit`, `github`, `web`, `e2e`, `recovery`, `regression`).
 
 Live evidence on 2026-11-27 comes from the wordfreq run: a single goal, real Claude agents, with Codex exhausted for its
 whole duration. The redacted timeline is in `docs/evidence/wordfreq-live/events.log`. The verified product ZIP and its
@@ -70,9 +70,13 @@ whole duration. The redacted timeline is in `docs/evidence/wordfreq-live/events.
 | Package accessible to the operator | `orchestrator release`, the dashboard download link, and `docs/evidence/wordfreq-live/` | ✅ live |
 
 ## Independent review of this platform (PR #1)
-An independent reviewer agent found 12 defects: 6 high, 3 medium and 3 low. It reproduced most of them against the real
-supervisor. All 12 were fixed with regression tests (`test/regression.test.ts`) in commit `cc58de6`. A re-review is in
-progress.
+An independent reviewer agent ran several rounds:
+- **Round 1:** 12 defects (6 high, 3 medium, 3 low), most reproduced against the real supervisor. All fixed with
+  regression tests in `cc58de6`.
+- **Round 2:** confirmed 9 of the 12 fixes and found 6 more issues (N1 high: git-metadata sandbox escape; N2–N5 medium;
+  N6 low). All fixed with regression tests in `2faadd4`. Verified live: a confined `claude -p` agent could not read
+  orchestrator secrets or rewrite `.git`, and could still write its worktree.
+- **Round 3:** in progress.
 
 ## Not yet verified
 - Live GitHub mode, needing a classic PAT; see the procedure.
