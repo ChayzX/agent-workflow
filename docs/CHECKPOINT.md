@@ -3,15 +3,17 @@
 This file is the durable hand-off for the session building this platform. Update it at each
 milestone boundary. Scheduled auto-resume reads "Next executable actions".
 
-## Current milestone (updated 2026-11-27 05:15 UTC)
-M1–M10 implemented; 28/28 automated tests pass (unit, GitHub contract, dashboard security, simulated E2E, recovery E/A–F).
-Live acceptance in progress:
-- wordfreq (single goal, real Claude; Codex exhausted until 07:08): home scratchpad/orch-live, daemon `orchestrator run`.
-  Evidence so far: plan → 9 work items, gates, same-provider reviews (labelled), live Q&A, integration audit created 3 defects
-  that were remediated, graceful SIGTERM restart (05:03), REAL Claude 5-hour limit hit at 05:10:13 with both providers
-  exhausted → waited → canary recovery 05:11:43 → native session resume.
-- Next: at/after 07:08 UTC run `node --disable-warning=ExperimentalWarning dist/test/live/live-acceptance.js <home>` for
-  dual-provider Codex⇄Claude Q&A, cross review, debate, dual audit (scratchpad/orch-live2).
+## Current milestone (updated 2026-11-27 05:35 UTC)
+- All milestones implemented. `npm test` 36/36. Live wordfreq run COMPLETED with verified release (evidence in
+  docs/evidence/wordfreq-live, matrix in docs/acceptance-matrix.md).
+- Independent review of PR #1 found 12 defects → all fixed in cc58de6 with regression tests; RE-REVIEW requested
+  (reviewer posts a COMMENT review with a verdict on PR #1).
+- Remaining:
+  1. Re-review verdict → fix anything found → merge PR #1 into main (operator authorized agent merges after review).
+  2. After 07:08 UTC Codex reset (scheduled wake 07:12): `node --disable-warning=ExperimentalWarning dist/test/live/live-acceptance.js <scratchpad>/orch-live2`
+     → record cross-provider Q&A/review/debate/audit evidence in docs/acceptance-matrix.md (rows marked ⏳).
+  3. Final self-package ZIP + checksums (orchestrator self-package), attach to a GitHub Release if possible or leave in releases/.
+  4. Delete the hourly "Resume orchestrator build" scheduled task when done.
 
 ## Verified facts (live evidence, 2026-11-27)
 - Claude Code CLI 2.1.332, subscription OAuth (`apiKeySource: "none"`). `claude -p --output-format stream-json`
