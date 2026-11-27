@@ -1,0 +1,26 @@
+# Hard ceiling on what one project can consume on a shared cluster. Size per project;
+# the sum of all project quotas must leave headroom for everything else on the cluster.
+# LoadBalancer and NodePort Services are disabled: they create OCI load balancers / open
+# node ports (cost and exposure). Request them through operator approval if needed.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: compute-and-storage
+  labels:
+    orchestrator.dev/layer: guardrails
+spec:
+  hard:
+    requests.cpu: "2"
+    requests.memory: 2Gi
+    limits.cpu: "4"
+    limits.memory: 4Gi
+    requests.ephemeral-storage: 4Gi
+    limits.ephemeral-storage: 8Gi
+    pods: "10"
+    persistentvolumeclaims: "2"
+    requests.storage: 100Gi
+    services: "5"
+    services.loadbalancers: "0"
+    services.nodeports: "0"
+    configmaps: "20"
+    secrets: "20"

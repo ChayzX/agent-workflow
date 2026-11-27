@@ -1,0 +1,15 @@
+# One namespace per project. The overlay's `namespace:` field renames it.
+# Pod Security Admission: `restricted` is enforced, audited and warned.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: orch-app
+  labels:
+    orchestrator.dev/layer: guardrails
+    orchestrator.dev/managed: "true"
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest

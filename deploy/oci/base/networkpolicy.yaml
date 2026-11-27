@@ -1,0 +1,83 @@
+# Default-deny ingress AND egress for every pod in the project namespace, then explicit allows.
+# NOTE: NetworkPolicy is only enforced if the cluster's CNI enforces it (e.g. Calico on OKE
+# flannel clusters; verify against current OCI docs for VCN-native pod networking).
+# preflight.sh checks that the objects exist; it cannot prove the CNI enforces them.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  labels:
+    orchestrator.dev/layer: guardrails
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+# DNS only to kube-dns/CoreDNS in kube-system.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  labels:
+    orchestrator.dev/layer: guardrails
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# HTTPS egress to an explicit allowlist only. NetworkPolicy matches CIDRs, not hostnames:
+# resolve each allowlisted host (e.g. api.twitch.tv, discord.com, OCIR, OCI Vault) to the
+# provider's published ranges, or route egress through an allowlisting egress proxy and
+# put ONLY the proxy's CIDR here. 203.0.113.0/24 is a documentation placeholder (RFC 5737)
+# and allows nothing real. Never use 0.0.0.0/0, and never include Pantry Bot's subnets.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-https-egress-allowlist
+  labels:
+    orchestrator.dev/layer: guardrails
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: app
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 203.0.113.0/24 # PLACEHOLDER: replace with allowlisted CIDRs
+      ports:
+        - protocol: TCP
+          port: 443
+---
+# Inbound HTTP only from the ingress controller's namespace (placeholder name). Delete this
+# policy if the project needs no inbound traffic (e.g. a bot that only makes outbound calls).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-from-ingress-controller
+  labels:
+    orchestrator.dev/layer: guardrails
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: app
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx # PLACEHOLDER
+      ports:
+        - protocol: TCP
+          port: 8080

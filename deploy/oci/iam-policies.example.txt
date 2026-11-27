@@ -1,0 +1,109 @@
+# OCI IAM policy EXAMPLES for deploying ONE orchestrator-built project.
+# Nothing here has been applied to a real tenancy. Statement syntax follows the OCI policy
+# language (Allow <subject> to <verb> <resource-type> in <location> [where <conditions>]);
+# items marked "VERIFY" must be checked against current OCI documentation before use.
+#
+# Placeholders:
+#   <project>              short project name, e.g. example-project
+#   orch-projects          parent compartment for ALL orchestrator projects
+#   orch-projects:<project> per-project child compartment (compartment path syntax)
+#   <cluster-ocid> <vault-ocid> <project-compartment-ocid>  resource OCIDs
+#
+# Ground rules
+# - Every statement is scoped to the project's own compartment (or one named resource).
+#   No statement uses `in tenancy` and no statement names Pantry Bot's compartment,
+#   cluster, vault, repositories, groups or dynamic groups.
+# - Separate identities per duty: deploy (runner), pull (OCIR read), push (CI build),
+#   secrets (External Secrets). No identity is a member of Administrators.
+# - Recommended: run orchestrator projects on their OWN OKE cluster in orch-projects, not on
+#   Pantry Bot's cluster. If a shared cluster is unavoidable, Kubernetes RBAC in
+#   ../base/rbac.yaml is what confines the runner to the project namespace; IAM `use
+#   clusters` alone does not grant Kubernetes permissions to non-admin users (VERIFY).
+#
+# -----------------------------------------------------------------------------------------
+# 0. One-time, by a tenancy administrator (human, not the orchestrator)
+# -----------------------------------------------------------------------------------------
+# Create compartment orch-projects and child orch-projects:<project>.
+# Create groups:   orch-platform-admins, orch-deploy-<project>, orch-pull-<project>,
+#                  orch-push-<project>
+# Create dynamic groups (matching rules are examples - VERIFY resource.type values):
+#   orch-devops-<project>:
+#     ALL {resource.type = 'devopsdeploypipeline', resource.compartment.id = '<project-compartment-ocid>'}
+#
+# Platform admins provision infrastructure for orchestrator projects only:
+Allow group orch-platform-admins to manage cluster-family in compartment orch-projects
+Allow group orch-platform-admins to manage virtual-network-family in compartment orch-projects
+Allow group orch-platform-admins to manage volume-family in compartment orch-projects
+Allow group orch-platform-admins to manage vaults in compartment orch-projects
+Allow group orch-platform-admins to manage keys in compartment orch-projects
+Allow group orch-platform-admins to manage secret-family in compartment orch-projects
+Allow group orch-platform-admins to manage repos in compartment orch-projects
+Allow group orch-platform-admins to manage devops-family in compartment orch-projects
+#
+# -----------------------------------------------------------------------------------------
+# 1. Deploy runner (namespace-scoped kubeconfig path) - group orch-deploy-<project>
+# -----------------------------------------------------------------------------------------
+# Enough to generate a kubeconfig / exchange an OCI token for the ONE cluster; what it can
+# do inside the cluster is decided by Kubernetes RBAC (Role/RoleBinding in the namespace).
+# Prefer using the in-cluster ServiceAccount token (kubectl create token, 1h) instead, in
+# which case the runner needs NO OCI IAM policy at all.
+Allow group orch-deploy-<project> to use clusters in compartment orch-projects:<project> where target.cluster.id = '<cluster-ocid>'
+#   VERIFY: that `target.cluster.id` is a supported condition variable for clusters;
+#   if not, drop the where-clause and rely on the project compartment containing only
+#   this project's cluster.
+# Do NOT grant the deploy group: manage cluster-family (control-plane changes, node pools),
+# any *-family on another compartment, or membership in Administrators (OKE maps tenancy
+# administrators to cluster-admin).
+#
+# -----------------------------------------------------------------------------------------
+# 2. OCIR pull - dedicated IAM user orch-pull-<project>, sole member of orch-pull-<project>
+# -----------------------------------------------------------------------------------------
+# The user's auth token is the password in the `ocir-pull` image pull secret.
+Allow group orch-pull-<project> to read repos in compartment orch-projects:<project>
+#
+# -----------------------------------------------------------------------------------------
+# 3. OCIR push - CI/build identity (never the runtime pull user)
+# -----------------------------------------------------------------------------------------
+Allow group orch-push-<project> to use repos in compartment orch-projects:<project>
+#   VERIFY: `use repos` permits pushing to EXISTING repositories; creating repositories
+#   needs `manage repos` - have a platform admin pre-create them instead.
+#
+# -----------------------------------------------------------------------------------------
+# 4. Secrets: External Secrets Operator reading ONLY this project's vault
+# -----------------------------------------------------------------------------------------
+# Option A - OKE workload identity (enhanced clusters; VERIFY exact variable names):
+Allow any-user to read secret-bundles in compartment orch-projects:<project> where all {request.principal.type = 'workload', request.principal.cluster_id = '<cluster-ocid>', request.principal.namespace = 'orch-<project>', request.principal.service_account = 'external-secrets'}
+#   VERIFY: the service account name must match the one ESO runs under (or the one its
+#   SecretStore uses); also confirm whether `read secret-bundles` alone suffices or ESO
+#   additionally needs `read secrets` to look secrets up by name.
+# Option B - instance principal of a dedicated node pool (weaker: every pod on those nodes
+# shares the identity). Avoid on any node pool that runs other workloads.
+#
+# -----------------------------------------------------------------------------------------
+# 5. OCI DevOps deployment pipeline (alternative to the namespace-scoped runner)
+# -----------------------------------------------------------------------------------------
+# VERIFY all of the following against the current OCI DevOps "policies for deployment
+# pipelines" page; DevOps examples frequently use broad statements - do NOT copy any
+# `manage all-resources` example.
+Allow dynamic-group orch-devops-<project> to read all-artifacts in compartment orch-projects:<project>
+Allow dynamic-group orch-devops-<project> to read repos in compartment orch-projects:<project>
+Allow dynamic-group orch-devops-<project> to use clusters in compartment orch-projects:<project> where target.cluster.id = '<cluster-ocid>'
+Allow dynamic-group orch-devops-<project> to use ons-topics in compartment orch-projects:<project>
+#   VERIFY: which Kubernetes identity the DevOps OKE deployment stage acts as inside the
+#   cluster, and bind it ONLY to the project-namespace Role (never cluster-admin). If the
+#   stage can only run with cluster-admin, use it only on a dedicated (non-Pantry-Bot)
+#   cluster, or use the namespace-scoped runner instead.
+#
+# -----------------------------------------------------------------------------------------
+# 6. Backups (Block Volume) - platform admins or a dedicated backup group
+# -----------------------------------------------------------------------------------------
+Allow group orch-platform-admins to manage volume-backups in compartment orch-projects:<project>
+#
+# -----------------------------------------------------------------------------------------
+# Never
+# -----------------------------------------------------------------------------------------
+# - Allow group orch-* to manage all-resources in tenancy
+# - Any statement `in compartment <pantry-bot-compartment>` or naming Pantry Bot resources
+# - Reusing Pantry Bot's groups, dynamic groups, vault, OCIR repositories or API keys
+# - If your tenancy supports deny policies (VERIFY availability), consider an explicit
+#   deny for orch-* subjects on Pantry Bot's compartment as defence in depth.

@@ -1,0 +1,18 @@
+# Persistent data for the project (e.g. SQLite file or local state). Backed by OCI Block
+# Volume through the OKE CSI driver. `oci-bv` is the usual OKE CSI storage class name and
+# Block Volume has a 50 GB minimum size (verify both against current OCI docs).
+# Back up with OCI Block Volume backups / VolumeSnapshots before every migration
+# (docs/oracle.md, "Backup"). Remove this file and the volume in deployment.yaml if the
+# project is stateless.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: app-data
+  labels:
+    orchestrator.dev/layer: workload
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: oci-bv
+  resources:
+    requests:
+      storage: 50Gi

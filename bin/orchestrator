@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+# Launcher: resolves the install directory and runs the compiled CLI with Node >= 22.13.
+set -e
+SELF="$0"
+while [ -h "$SELF" ]; do
+  LINK=$(readlink "$SELF")
+  case "$LINK" in /*) SELF="$LINK" ;; *) SELF="$(dirname "$SELF")/$LINK" ;; esac
+done
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+NODE_BIN="${ORCH_NODE:-node}"
+exec "$NODE_BIN" --disable-warning=ExperimentalWarning "$ROOT/dist/src/cli/main.js" "$@"
