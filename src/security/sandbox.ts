@@ -4,6 +4,7 @@
 import { existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
+import { dirname } from 'node:path';
 import type { Config } from '../core/config.js';
 import { runProcess, type RunResult } from '../providers/process.js';
 
@@ -72,7 +73,13 @@ export function wrapCommand(cfg: Config, spec: SandboxSpec, command: string): { 
   if (mode === 'none') return { cmd: 'sh', args: ['-c', command], mode };
   const args = ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp', '--die-with-parent', '--new-session', '--unshare-all'];
   if (spec.network) args.push('--share-net');
-  for (const h of [homedir(), ...spec.hide]) if (existsSync(h)) args.push('--tmpfs', h);
+  // Hide every user home (not just ours: credentials of other accounts may be readable) and the orchestrator home.
+  const hidden = [...new Set(['/root', '/home', homedir(), ...spec.hide])].filter((h) => existsSync(h));
+  for (const h of hidden) args.push('--tmpfs', h);
+  // Re-expose, read-only, only the toolchain directories gates need (e.g. Node installed under a home via nvm).
+  const under = (p: string) => hidden.some((h) => p === h || p.startsWith(h + '/'));
+  const tool = [dirname(dirname(process.execPath)), ...(process.env.PATH ?? '').split(':')].filter((p) => p && p.startsWith('/') && existsSync(p) && under(p) && !/\.(codex|claude|ssh|gnupg|config|aws|kube)\b/.test(p));
+  for (const t of [...new Set(tool)]) args.push('--ro-bind', t, t);
   for (const w of spec.writable) args.push('--bind', w, w);
   args.push('--chdir', spec.cwd, 'sh', '-c', command);
   return { cmd: findBwrap()!, args, mode };
