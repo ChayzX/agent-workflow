@@ -142,7 +142,7 @@ orchestrator doctor
 ## Status
 
 **v0.1.0.** The build was merged after five rounds of independent agent code review, which found 24 defects, all fixed
-with regression tests. `npm test` passes 45 of 45.
+with regression tests. `npm test` passes 48 of 48.
 
 - **Verified live:**
   - A complete product, `wordfreq`, built autonomously from one goal by real Claude agents. Verified release:

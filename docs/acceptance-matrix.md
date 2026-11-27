@@ -7,7 +7,7 @@ How to read the Status column:
 - **⏳ pending:** a live run is scheduled or needs operator credentials. The procedure is in `docs/live-acceptance.md`.
 - **❌:** not done.
 
-Automated suite: `npm test` passes 45 of 45 (`test/unit`, `github`, `web`, `e2e`, `recovery`, `regression`).
+Automated suite: `npm test` passes 48 of 48 (`test/unit`, `github`, `web`, `e2e`, `recovery`, `regression`).
 
 Live evidence on 2026-11-27 comes from the wordfreq run: a single goal, real Claude agents, with Codex exhausted for its
 whole duration. The redacted timeline is in `docs/evidence/wordfreq-live/events.log`. The verified product ZIP and its
