@@ -12,7 +12,9 @@ the host (including the unrelated Pantry Bot infrastructure) · release integrit
 | Threat | Control (enforced in code / OS, not prompts) | Verified by |
 |---|---|---|
 | Prompt injection via repo files, issues or messages makes an agent push, merge, exfiltrate or skip checks | Agents have no GitHub/cloud credentials, and the supervisor alone pushes and merges. Gates decide pass/fail from exit codes. Findings close only through independent verification. Approvals are needed for consequential actions. | `test/e2e.test.ts`, `unit: env scrubbing` |
-| Agent reads secrets from the environment | Allowlisted agent environment; `GITHUB_TOKEN`, `AWS_*`, `*_SECRET*`, SSH agent and API keys removed | `unit: security` |
+| Agent reads secrets from the environment, files or supervisor memory | Allowlisted agent environment (`GITHUB_TOKEN`, `AWS_*`, `*_SECRET*`, SSH agent and API keys removed), plus a bubblewrap agent sandbox: `$ORCH_HOME` and all homes hidden, own PID namespace, read-only shared repo | `unit: security`, `regression: review#5` |
+| Agent plants git hooks or config to hijack an authenticated push | Hooks disabled for all supervisor git calls; repo config allowlisted before fetch/push; `--no-verify` push | `git.ts` (`sanitizeConfig`) |
+| Symlink smuggles outside files into a release | `lstat` walkers; escaping links fail packaging and scanning; extraction refuses unsafe links | `regression: review#4` |
 | Gate or verification command (untrusted) reads credentials, writes outside the worktree, or calls home | bubblewrap: `--unshare-all` (no network), real home and orchestrator home replaced by tmpfs, only the worktree writable, `--die-with-parent` | `unit: sandbox (bubblewrap)` |
 | Silent switch to paid API billing | API keys stripped. Claude `apiKeySource` and Codex account-type guards abort the run and create a spending approval. | `unit: claude adapter billing` |
 | Duplicate or unauthorized merges | Exact-commit invariant (gated = reviewed = merged head). GitHub merge uses the `sha` precondition. A required human review becomes an approval and is never impersonated. | `github.test.ts` (409/405) |
@@ -41,12 +43,14 @@ These require an operator approval (`orchestrator approvals`, or the dashboard):
 - `provider_reauthentication`
 
 ## Residual risks (documented, not hidden)
-- **Claude implementers' `Bash`** runs with the service user's permissions inside the worktree's cwd. It is not
-  OS-sandboxed by the orchestrator. Mitigations are the dedicated unprivileged service account, the hardened unit
-  (`ProtectSystem=strict`, `ProtectHome`, `ReadWritePaths` limited to the data dir), and the scrubbed environment. For
-  stronger isolation, enable Claude Code's sandbox through `providers.claude.extraArgs`
-  (`["--settings", "{\"sandbox\":{\"enabled\":true}}"]`).
-- **Without bubblewrap**, gate commands run unsandboxed (`doctor` warns about this).
+- **Agent processes are confined with bubblewrap when it is available** (`security.agentSandbox: auto`).
+  - Hidden from them: every home directory, `$ORCH_HOME` (secrets, other projects, the shared repo config and hooks) and the supervisor's processes (own PID namespace).
+  - Read-only: toolchains and the shared repository objects.
+  - Writable: only their worktree, its git index directory, and the provider's own session and cache directories.
+  - Network: kept.
+  - **Without bubblewrap**, agents run as the service user with a scrubbed environment, so a malicious agent could read files that user can read. In that case use the dedicated service account and the hardened unit, or install bubblewrap (`doctor` warns).
+- **Supervisor git operations** run with hooks disabled (`core.hooksPath=/dev/null`), `fsmonitor` off and `ext::` transport disabled. The shared repository config is reduced to an allowlist before every fetch and push, so agents cannot redirect authenticated pushes (`url.*.insteadOf`, `http.*`, `include.*`, credential helpers).
+- **Without bubblewrap**, gate commands also run unsandboxed (`doctor` warns about this).
 - **The dashboard has a single operator role.** There are no per-user accounts.
 - **HawkScan DAST was not run** in the build environment, because installing the hawk CLI was not permitted there. A
   manual probe of authentication, CSRF, headers, limits, traversal and throttling was run instead; see the acceptance

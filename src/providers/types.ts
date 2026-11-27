@@ -47,6 +47,8 @@ export interface ExecRequest {
   transcriptPath?: string;
   onEvent?: (e: ProviderEvent) => void;
   onSpawn?: (pid: number) => void;
+  /** Optional OS confinement applied by the supervisor; adapters pass extra scratch dirs they need writable. */
+  wrap?: (cmd: string, args: string[], extraWritable: string[]) => { cmd: string; args: string[] };
   meta: { taskId: string; taskKind: TaskKind; role: RoleId; projectId: string; workItemKey?: string | null; attempt: number; agentId?: string | null };
 }
 

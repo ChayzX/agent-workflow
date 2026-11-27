@@ -88,11 +88,20 @@ export class Dashboard {
     if (method === 'GET' && !path.startsWith('/api/')) return this.static(res, path);
 
     if (path === '/api/login' && method === 'POST') {
-      const ip = req.socket.remoteAddress ?? '?';
-      const a = this.attempts.get(ip) ?? { n: 0, reset: Date.now() + 60_000 };
-      if (Date.now() > a.reset) { a.n = 0; a.reset = Date.now() + 60_000; }
-      if (++a.n > 10) { this.attempts.set(ip, a); return this.send(res, 429, { error: 'too many attempts' }); }
-      this.attempts.set(ip, a);
+      // Per-client (forwarded address only when a trusted proxy is configured) and global limits; bounded memory.
+      const fwd = this.ctx.cfg.dashboard.trustProxy ? String(req.headers['x-forwarded-for'] ?? '').split(',')[0]!.trim() : '';
+      const ip = fwd || req.socket.remoteAddress || '?';
+      const now = Date.now();
+      if (this.attempts.size > 5000) for (const [k, v] of this.attempts) if (now > v.reset) this.attempts.delete(k);
+      if (this.attempts.size > 10000) this.attempts.clear();
+      const hit = (key: string, max: number) => {
+        const a = this.attempts.get(key) ?? { n: 0, reset: now + 60_000 };
+        if (now > a.reset) { a.n = 0; a.reset = now + 60_000; }
+        a.n++;
+        this.attempts.set(key, a);
+        return a.n > max;
+      };
+      if (hit(`ip:${ip}`, 10) || hit('global', 60)) return this.send(res, 429, { error: 'too many attempts' });
       if (!this.csrfOk(req)) return this.send(res, 403, { error: 'csrf' });
       const { token } = await this.body(req, 4096);
       const expected = this.ctx.cfg.dashboard.tokenHash;

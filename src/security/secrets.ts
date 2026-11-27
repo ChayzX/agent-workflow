@@ -1,17 +1,17 @@
 // Secret scanning for diffs, trees and release packages (deterministic, no network).
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { readdirSync, readFileSync, lstatSync, readlinkSync } from 'node:fs';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 
 export interface SecretHit { path: string; line: number; rule: string; excerpt: string }
 
 const RULES: Array<[string, RegExp]> = [
   ['github-token', /\b(gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{60,})\b/],
-  ['anthropic-key', /\bsk-ant-(?:api|admin)\d{2}-[A-Za-z0-9_-]{40,}/],
+  ['anthropic-key', /\bsk-ant-(?:api|admin|oat|ort)\d{2}-[A-Za-z0-9_-]{30,}/],
   ['openai-key', /\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{40,}\b/],
   ['aws-access-key', /\b(AKIA|ASIA)[0-9A-Z]{16}\b/],
   ['slack-token', /\bxox[baprs]-[0-9A-Za-z-]{20,}/],
   ['private-key', /-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----/],
-  ['generic-assigned-secret', /(?:password|passwd|secret|api[_-]?key|access[_-]?token|client[_-]?secret)\s*[:=]\s*["'][A-Za-z0-9+/_\-]{16,}["']/i],
+  ['generic-assigned-secret', /(?:password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|id[_-]?token)["']?\s*[:=]\s*["'][A-Za-z0-9+/_.\-]{16,}["']/i],
 ];
 
 const FORBIDDEN_FILES = [/(^|\/)\.env$/, /(^|\/)\.env\.(?!example$|template$|sample$)[^/]+$/, /\.pem$/, /(^|\/)id_(rsa|ed25519|ecdsa)$/, /\.p12$/, /\.pfx$/, /(^|\/)auth\.json$/, /(^|\/)\.npmrc$/, /(^|\/)credentials(\.json)?$/];
@@ -40,9 +40,14 @@ export function scanTree(root: string, opts: { includeDeps?: boolean } = {}): Se
     for (const name of readdirSync(dir)) {
       if (!opts.includeDeps && SKIP_DIRS.has(name)) continue;
       const p = join(dir, name);
-      const st = statSync(p, { throwIfNoEntry: false });
+      const st = lstatSync(p, { throwIfNoEntry: false });
       if (!st) continue;
       const rel = relative(root, p);
+      if (st.isSymbolicLink()) {
+        const t = resolve(dirname(p), readlinkSync(p));
+        if (!t.startsWith(resolve(root) + sep)) hits.push({ path: rel, line: 0, rule: 'symlink-escape', excerpt: 'symbolic link points outside the tree' });
+        continue;
+      }
       if (st.isDirectory()) { walk(p); continue; }
       if (isForbiddenFile(rel)) { hits.push({ path: rel, line: 0, rule: 'forbidden-file', excerpt: 'credential-bearing file type' }); continue; }
       if (st.size > 2 * 1024 * 1024) continue;

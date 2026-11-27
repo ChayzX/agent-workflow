@@ -1,7 +1,7 @@
 // The supervisor: a persistent, deterministic control loop. It owns leases, dispatch,
 // provider capacity, recovery and shutdown. Autonomy is event-driven: a tick does only
 // database work and launches bounded agent invocations; it never "asks a model to continue".
-import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeSync, readdirSync } from 'node:fs';
+import { closeSync, existsSync, linkSync, openSync, readFileSync, unlinkSync, writeSync, readdirSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { json } from '../core/db.js';
@@ -9,7 +9,7 @@ import { newId, randomToken } from '../core/ids.js';
 import type { ExecFailure, ExecResult } from '../providers/types.js';
 import { killTree } from '../providers/process.js';
 import type { FailureClass, ProjectRow, TaskRow } from '../core/types.js';
-import { agentEnv } from '../security/sandbox.js';
+import { agentEnv, wrapAgentCommand } from '../security/sandbox.js';
 import { validate } from '../util/validate.js';
 import { buildPrompt } from './context.js';
 import type { Ctx } from './ctx.js';
@@ -41,16 +41,33 @@ export class Supervisor {
   wake(): void { this.wakeFn?.(); }
 
   // ------------------------------------------------------------ lifecycle
+  /**
+   * Single-instance lock. Acquisition is an atomic link() of a fully written temp file (fails if the lock
+   * exists); a stale lock is removed only if it still has the exact stale content, then acquisition retries.
+   */
   acquireLock(): void {
-    if (existsSync(this.lockPath)) {
-      const [pidStr] = readFileSync(this.lockPath, 'utf8').split(' ');
-      const pid = Number(pidStr);
-      if (pid && pid !== process.pid && isAlive(pid)) throw new Error(`another supervisor is running (pid ${pid}); refusing to start a second one`);
-      unlinkSync(this.lockPath);
-    }
-    const fd = openSync(this.lockPath, 'wx', 0o600);
-    writeSync(fd, `${process.pid} ${this.instanceId}`);
+    const mine = `${process.pid} ${this.instanceId}`;
+    const tmp = `${this.lockPath}.${process.pid}.${randomToken(4)}`;
+    const fd = openSync(tmp, 'wx', 0o600);
+    writeSync(fd, mine);
     closeSync(fd);
+    try {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try { linkSync(tmp, this.lockPath); break; } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+          let content = '';
+          try { content = readFileSync(this.lockPath, 'utf8'); } catch { continue; }
+          const pid = Number(content.split(' ')[0]);
+          if (pid && isAlive(pid) && content !== mine) throw new Error(`another supervisor is running (pid ${pid}); refusing to start a second one`);
+          // Stale: remove only if unchanged since we read it (another starter may have replaced it).
+          try { if (readFileSync(this.lockPath, 'utf8') === content) unlinkSync(this.lockPath); } catch { /* raced */ }
+          if (attempt === 2) throw new Error('could not acquire supervisor lock');
+        }
+      }
+      if (readFileSync(this.lockPath, 'utf8') !== mine) throw new Error('supervisor lock was taken by another instance');
+    } finally {
+      try { unlinkSync(tmp); } catch { /* gone */ }
+    }
   }
 
   releaseLock(): void {
@@ -250,9 +267,9 @@ export class Supervisor {
             }
             break;
           case 'cancel_task': {
-            const r = this.running.get(args.taskId);
-            r?.ac.abort();
-            this.ctx.queue.fail(args.taskId, null, 'cancelled', 'interrupted', `cancelled by ${c.issued_by}`);
+            // Mark first (fences the running worker's later writes), then interrupt it.
+            if (!this.ctx.queue.cancel(args.taskId, `cancelled by ${c.issued_by}`)) result = 'task already finished; not cancelled';
+            this.running.get(args.taskId)?.ac.abort();
             break;
           }
           case 'kill_agent': {
@@ -331,6 +348,12 @@ export class Supervisor {
           if (e.kind === 'rate_limit') ctx.events.emit('provider.rate_limit_event', `${route.provider} rate-limit event`, { projectId: task.project_id, taskId: task.id, level: 'debug', data: e.data });
         },
         maxTurns: ctx.cfg.providers[route.provider]?.maxTurns,
+        wrap: (cmd, args, extra) => {
+          // The worktree's git dir (index etc.) is writable; the shared repository is read-only for agents.
+          const repoGit = join(project.workspace_dir, 'repo.git');
+          const gitDir = cwd.startsWith(join(project.workspace_dir, 'wt')) ? join(repoGit, 'worktrees', cwd.split('/').pop()!) : null;
+          return wrapAgentCommand(ctx.cfg, { orchHome: ctx.paths.home, writable: [...(task.read_only ? [] : [cwd]), ...(gitDir ? [gitDir] : []), ...extra], readOnly: [repoGit, ...(task.read_only ? [cwd] : [])] }, cmd, args);
+        },
         meta: { taskId: task.id, taskKind: task.kind, role: task.role, projectId: task.project_id, workItemKey: task.work_item_id ? this.workflow.store.workItem(task.work_item_id)?.key : null, attempt: task.attempts, agentId: task.agent_id },
       });
     } finally {

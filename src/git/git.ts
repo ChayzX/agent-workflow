@@ -21,7 +21,9 @@ export function git(cwd: string, args: string[], opts: { env?: Record<string, st
       ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_AUTHOR_NAME: BOT.name, GIT_AUTHOR_EMAIL: BOT.email,
       GIT_COMMITTER_NAME: BOT.name, GIT_COMMITTER_EMAIL: BOT.email, ...opts.env,
     };
-    const child = execFile('git', args, { cwd, env, maxBuffer: 64 * 1024 * 1024, timeout: opts.timeoutMs ?? 300_000 }, (err, stdout, stderr) => {
+    // Never execute repository hooks or config-defined helpers from agent-writable repositories.
+    const hardened = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'protocol.ext.allow=never', '-c', 'core.sshCommand=ssh', ...args];
+    const child = execFile('git', hardened, { cwd, env, maxBuffer: 64 * 1024 * 1024, timeout: opts.timeoutMs ?? 300_000 }, (err, stdout, stderr) => {
       const code = err ? (typeof (err as NodeJS.ErrnoException).code === 'number' ? Number((err as NodeJS.ErrnoException).code) : 1) : 0;
       const r = { code, stdout: String(stdout), stderr: String(stderr) };
       if (code !== 0 && !opts.allowFail) reject(new GitError(args, r));
@@ -80,6 +82,7 @@ export class Workspace {
   }
 
   async fetch(): Promise<void> {
+    await this.sanitizeConfig(null);
     await git(this.bare, ['fetch', '--prune', 'origin'], { env: this.auth() });
   }
 
@@ -167,8 +170,30 @@ export class Workspace {
     return { ok: false, conflicts };
   }
 
+  /**
+   * Strip repository-local config that could redirect or intercept authenticated network operations
+   * (url.*.insteadOf, http.*, credential.*, include*, core.gitProxy, …). Agents can write inside
+   * worktrees, so the shared config is re-validated before every fetch/push.
+   */
+  async sanitizeConfig(expectedRemote: string | null): Promise<string[]> {
+    const removed: string[] = [];
+    const list = (await git(this.bare, ['config', '--local', '--list', '--name-only'], { allowFail: true })).stdout.split('\n').filter(Boolean);
+    const allowed = /^(core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode)|remote\.origin\.(url|fetch)|branch\.[^.]+\.(remote|merge)|gc\.[a-z]+|init\.defaultbranch)$/i;
+    for (const key of [...new Set(list)]) {
+      if (allowed.test(key)) continue;
+      await git(this.bare, ['config', '--local', '--unset-all', key], { allowFail: true });
+      removed.push(key);
+    }
+    if (expectedRemote) {
+      const cur = (await git(this.bare, ['config', '--local', 'remote.origin.url'], { allowFail: true })).stdout.trim();
+      if (cur !== expectedRemote) { await git(this.bare, ['config', '--local', 'remote.origin.url', expectedRemote]); removed.push(`remote.origin.url(${cur})`); }
+    }
+    return removed;
+  }
+
   async push(branch: string, force = false): Promise<void> {
-    await git(this.bare, ['push', ...(force ? ['--force-with-lease'] : []), 'origin', `refs/heads/${branch}:refs/heads/${branch}`], { env: this.auth() });
+    await this.sanitizeConfig(null);
+    await git(this.bare, ['push', '--no-verify', ...(force ? ['--force-with-lease'] : []), 'origin', `refs/heads/${branch}:refs/heads/${branch}`], { env: this.auth() });
   }
 
   /** After a remote (PR) merge: fast-forward the integration worktree to the remote default branch. */

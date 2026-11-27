@@ -4,7 +4,7 @@
 import { existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { Config } from '../core/config.js';
 import { runProcess, type RunResult } from '../providers/process.js';
 
@@ -89,4 +89,43 @@ export async function runSandboxed(cfg: Config, spec: SandboxSpec, command: stri
   const w = wrapCommand(cfg, spec, command);
   const r = await runProcess(w.cmd, w.args, { cwd: spec.cwd, env, timeoutMs, maxCaptureBytes: 2 * 1024 * 1024 });
   return { ...r, sandbox: w.mode };
+}
+
+export interface AgentSandboxSpec {
+  orchHome: string;
+  writable: string[];      // worktree (+ its git index dir) and adapter scratch dirs
+  readOnly: string[];      // e.g. the shared bare repository (objects/refs) for read-only git use
+}
+
+export function agentSandboxMode(cfg: Config): 'bwrap' | 'none' {
+  const m = cfg.security.agentSandbox ?? 'auto';
+  if (m === 'none') return 'none';
+  const b = findBwrap();
+  if (m === 'bwrap' && !b) throw new Error('security.agentSandbox=bwrap but bubblewrap is unavailable');
+  return b ? 'bwrap' : 'none';
+}
+
+/**
+ * Confine a provider CLI (and every tool it runs) so agents cannot read orchestrator secrets, other
+ * projects' worktrees, the shared repository config/hooks, other users' homes or the supervisor's
+ * process memory (/proc), while keeping network and the provider's own session directories.
+ */
+export function wrapAgentCommand(cfg: Config, spec: AgentSandboxSpec, cmd: string, args: string[]): { cmd: string; args: string[] } {
+  if (agentSandboxMode(cfg) === 'none') return { cmd, args };
+  const home = homedir();
+  const a = ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp', '--die-with-parent', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--share-net'];
+  const hidden = [...new Set(['/root', '/home', home, spec.orchHome])].filter((h) => existsSync(h));
+  for (const h of hidden) a.push('--tmpfs', h);
+  const under = (p: string) => hidden.some((h) => p === h || p.startsWith(h + '/'));
+  // Toolchains (e.g. nvm-installed node/claude/codex) read-only.
+  const tool = [dirname(dirname(process.execPath)), ...(process.env.PATH ?? '').split(':')].filter((p) => p && p.startsWith('/') && existsSync(p) && under(p) && !/\.(codex|claude|ssh|gnupg|aws|kube|config\/gh)\b/.test(p));
+  for (const t of [...new Set(tool)]) a.push('--ro-bind', t, t);
+  // Provider session/config directories and package caches read-write (they hold the CLI's own login).
+  const providerPaths = ['.claude', '.claude.json', '.codex', '.config/claude', '.npm', '.cache', '.local/share/claude', '.local/state/claude']
+    .map((p) => join(home, p)).concat([process.env.CLAUDE_CONFIG_DIR, process.env.CODEX_HOME].filter((x): x is string => !!x));
+  for (const p of [...new Set(providerPaths)]) if (existsSync(p)) a.push('--bind', p, p);
+  for (const r of spec.readOnly) if (existsSync(r)) a.push('--ro-bind', r, r);
+  for (const w of spec.writable) if (existsSync(w)) a.push('--bind', w, w);
+  a.push('--', cmd, ...args);
+  return { cmd: findBwrap()!, args: a };
 }

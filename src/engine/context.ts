@@ -202,6 +202,7 @@ function auditInstructions(): string {
     'Mark blocked only when a genuine external blocker is recorded. Otherwise unsatisfied, with the specific gap.',
     'Check documentation accuracy against the implementation, installation reproducibility, and package usability.',
     'Report defects (with severity) that must be fixed before release. Do not recommend release if any mandatory requirement is unsatisfied or any critical/high defect exists.',
+    'You cannot run commands in this audit. The quality-gate results listed below were executed by the supervisor on this exact commit and are first-hand execution evidence; inability to run commands yourself is NOT a reason to decline. Decline only with a concrete unsatisfied requirement key or a defect.',
   ]);
 }
 

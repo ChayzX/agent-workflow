@@ -29,5 +29,9 @@ Status: Accepted (2026-11-27)
 ## Consequences
 - Without bubblewrap, gate commands run as the service user with a scrubbed environment. `doctor` warns about this, and
   the installer offers to install bubblewrap.
-- Claude's `Bash` tool for implementers is not OS-sandboxed by the orchestrator. Rely on the dedicated service account
-  and the systemd hardening, or enable Claude Code's own sandbox settings through `providers.claude.extraArgs`.
+- Agent CLIs (and everything they run) are wrapped in bubblewrap when it is available.
+  - Hidden: `$ORCH_HOME` and every home directory.
+  - Own PID namespace, so the supervisor's `/proc` is not visible.
+  - Writable: the worktree, its git index and the provider session directories only.
+  - Verified live with `claude -p`, and with Codex's own nested sandbox, on 2026-11-27.
+- Supervisor git calls disable hooks, and repository config is allowlisted before network operations.

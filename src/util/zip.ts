@@ -1,7 +1,7 @@
 // Dependency-free ZIP writer/reader (deflate via node:zlib, CRC32 via zlib.crc32).
 // Deterministic output: fixed timestamps and sorted entries make releases reproducible.
 import { deflateRawSync, inflateRawSync, crc32 } from 'node:zlib';
-import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, readdirSync, lstatSync, readlinkSync, writeFileSync, mkdirSync, symlinkSync } from 'node:fs';
 import { join, relative, dirname, resolve, sep } from 'node:path';
 
 export interface ZipEntry { name: string; data: Buffer; mode?: number }
@@ -82,6 +82,13 @@ export function extractZip(path: string, dest: string): string[] {
     if (!target.startsWith(root + sep)) throw new Error(`unsafe path in archive: ${e.name}`);
     if (e.name.endsWith('/')) { mkdirSync(target, { recursive: true }); continue; }
     mkdirSync(dirname(target), { recursive: true });
+    if (((e.mode ?? 0) & 0o170000) === 0o120000) {
+      const linkTarget = e.data.toString('utf8');
+      if (!resolve(dirname(target), linkTarget).startsWith(root + sep)) throw new Error(`unsafe symlink in archive: ${e.name} -> ${linkTarget}`);
+      symlinkSync(linkTarget, target);
+      names.push(e.name);
+      continue;
+    }
     writeFileSync(target, e.data, { mode: (e.mode ?? 0o644) & 0o777 || 0o644 });
     names.push(e.name);
   }
@@ -95,8 +102,13 @@ export function collectDir(root: string, prefix: string, skip: (rel: string) => 
       const p = join(d, n);
       const rel = relative(root, p);
       if (skip(rel)) continue;
-      const st = statSync(p);
-      if (st.isDirectory()) walk(p);
+      const st = lstatSync(p); // never follow links: a link could point at credentials outside the tree
+      if (st.isSymbolicLink()) {
+        const target = readlinkSync(p);
+        const resolved = resolve(dirname(p), target);
+        if (!resolved.startsWith(resolve(root) + sep)) throw new Error(`symlink escapes the package root: ${rel} -> ${target}`);
+        out.push({ name: `${prefix}/${rel.split(sep).join('/')}`, data: Buffer.from(target), mode: 0o120777 });
+      } else if (st.isDirectory()) walk(p);
       else if (st.isFile()) out.push({ name: `${prefix}/${rel.split(sep).join('/')}`, data: readFileSync(p), mode: 0o100000 | (st.mode & 0o777) });
     }
   };

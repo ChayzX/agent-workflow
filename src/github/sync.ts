@@ -267,10 +267,24 @@ export class GitHubSync {
     return changes;
   }
 
+  async pullState(n: number): Promise<{ state: 'open' | 'closed'; merged: boolean; mergeSha: string | null }> {
+    const pr = await this.client.request<{ state: 'open' | 'closed'; merged: boolean; merge_commit_sha: string | null }>('GET', `${this.r}/pulls/${n}`);
+    return { state: pr.state, merged: !!pr.merged, mergeSha: pr.merge_commit_sha };
+  }
+
+  forgetPullRequest(key: string): void {
+    this.db.run("DELETE FROM github_objects WHERE project_id=? AND kind='pr' AND key=?", this.projectId, key);
+  }
+
   async ensurePullRequest(w: WorkItemRow, base: string): Promise<{ number: number; url: string }> {
     const m = this.mapped('pr', w.key);
-    if (m?.number) return { number: m.number, url: m.url ?? '' };
-    const existing = await this.client.request<Array<{ number: number; html_url: string }>>('GET', `${this.r}/pulls?state=all&head=${encodeURIComponent(`${this.owner}:${w.branch}`)}`);
+    if (m?.number) {
+      const st = await this.pullState(m.number).catch(() => null);
+      if (st && st.state === 'open') return { number: m.number, url: m.url ?? '' };
+      this.forgetPullRequest(w.key); // closed or unknown: never reuse
+    }
+    // Only an OPEN PR for this head branch may be reused (closed PRs are never revived).
+    const existing = await this.client.request<Array<{ number: number; html_url: string }>>('GET', `${this.r}/pulls?state=open&head=${encodeURIComponent(`${this.owner}:${w.branch}`)}`);
     let pr = existing?.[0];
     if (!pr) {
       pr = await this.client.request('POST', `${this.r}/pulls`, {

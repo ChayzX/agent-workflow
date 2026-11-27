@@ -34,8 +34,8 @@ Stated plainly so nothing is over-claimed. See `docs/acceptance-matrix.md` for w
   bubblewrap. It is not a fresh VM or container image; the build host had no container daemon.
 
 ## Security
-- **Claude implementers' `Bash` tool is not OS-sandboxed by the orchestrator.** Use the dedicated service account and
-  the hardened unit, or enable Claude Code's sandbox through `extraArgs`; see `docs/security.md`.
+- **Without bubblewrap, agent processes are not OS-confined** beyond the scrubbed environment and the systemd unit. With
+  bubblewrap available (the default `auto`), they are confined; see `docs/security.md`.
 - **The dashboard has a single operator token** and no RBAC. Keep it on loopback or behind TLS.
 - **HawkScan DAST was not run in the build environment** (installing the CLI was not permitted there). A manual probe of
   authentication, CSRF, headers, input limits, traversal and throttling was run, and two issues it found were fixed.

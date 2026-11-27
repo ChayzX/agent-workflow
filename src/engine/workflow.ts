@@ -216,34 +216,66 @@ export class Workflow {
       const blocking = this.store.findings(p.id, { workItemId: w.id, statuses: ['open', 'fixed_claimed'] }).filter((f) => isBlocking(f.severity));
       // Approval carried over by an identical patch-id (clean update from the default branch): no re-review needed.
       if (cur.reviewed_commit === head && !blocking.length) this.store.transition(w.id, ['gating'], 'merge_ready', { gated_commit: head }, 'gates passed; review approval carried over (identical patch)');
-      else this.store.transition(w.id, ['gating'], 'in_review', { gated_commit: head });
+      else if (this.store.transition(w.id, ['gating'], 'in_review', { gated_commit: head })) this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'in_review', summary: `review round on ${head.slice(0, 8)}` });
     } else {
       this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'gate_failure', summary: `gates failed on ${head.slice(0, 8)}: ${s.results.filter((r) => r.status !== 'pass').map((r) => r.name).join(', ')}` });
       this.toRemediation(p, w, 'gates', { gateCommit: head });
     }
   }
 
+  /** Monotonic per-item counter (number of times the item entered a phase) used to version task keys. */
+  private epoch(w: WorkItemRow, kind: string): number {
+    return this.ctx.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM checkpoints WHERE work_item_id=? AND kind=?', w.id, kind)!.n;
+  }
+
+  /**
+   * Ensure one live task exists for a key family. A dead or cancelled latest task is replaced (bounded);
+   * returns null when retries are exhausted so the caller can escalate.
+   */
+  private ensureFamily(spec: Parameters<Ctx['queue']['enqueue']>[0], maxRetries = 2): TaskRow | null {
+    const base = spec.idempotencyKey;
+    const latest = this.ctx.queue.latestByPrefix(base);
+    if (!latest) return this.ctx.queue.enqueue(spec).task;
+    if (!['dead', 'cancelled', 'failed'].includes(latest.status)) return latest;
+    if (!latest.processed && latest.status !== 'cancelled') return latest; // let onDead run first
+    const n = this.ctx.queue.countByPrefix(base);
+    if (n > maxRetries) return null;
+    return this.ctx.queue.enqueue({ ...spec, idempotencyKey: `${base}:x${n}` }).task;
+  }
+
   private toRemediation(p: ProjectRow, w: WorkItemRow, reason: 'gates' | 'findings' | 'conflicts' | 'merge_gates' | 'ci', extra: Record<string, unknown> = {}): void {
     const cur = this.store.workItem(w.id)!;
     const rounds = cur.remediation_rounds + 1;
-    if (rounds > this.ctx.cfg.limits.maxRemediationRounds) { this.requestInvestigation(p, cur, `remediation rounds exceeded (${reason})`); return; }
+    if (rounds > this.ctx.cfg.limits.maxRemediationRounds) {
+      // Park in a state the tick does not re-trigger, then investigate once.
+      this.store.transition(w.id, [cur.status], 'remediation', {}, `investigating: remediation rounds exceeded (${reason})`);
+      this.requestInvestigation(p, this.store.workItem(w.id)!, `remediation rounds exceeded (${reason})`);
+      return;
+    }
     if (this.store.transition(w.id, [cur.status], 'remediation', { remediation_rounds: rounds }, reason)) {
       this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'remediation', summary: `round ${rounds}: ${reason}`, data: extra });
     }
   }
 
+  private investigationActive(w: WorkItemRow): boolean {
+    return !!this.ctx.db.get("SELECT 1 FROM tasks WHERE work_item_id=? AND kind='investigate' AND (status IN ('queued','running','waiting_message','waiting_capacity') OR (status='succeeded' AND processed=0))", w.id);
+  }
+
   private ensureRemediation(p: ProjectRow, w: WorkItemRow): void {
-    if (this.ctx.queue.activeForWorkItem(w.id).some((t) => t.kind === 'remediate' || t.kind === 'investigate')) return;
+    if (this.investigationActive(w)) return;
+    if (this.ctx.queue.activeForWorkItem(w.id).some((t) => t.kind === 'remediate')) return;
+    if (w.status_reason?.startsWith('investigating')) return;
     const ck = this.store.checkpoints(p.id, w.id, 20).filter((c) => c.kind === 'remediation').at(-1);
     const data = json<Record<string, unknown>>(ck?.data, {});
     // After two rounds with the same agent, bring in a different agent (and preferably provider).
     const fresh = w.remediation_rounds >= 3;
     const agent = fresh ? this.team.ensureAgent(p.id, w.role, { exclude: w.implementer_agent_id ? [w.implementer_agent_id] : [] }) : (w.implementer_agent_id ? this.store.agent(w.implementer_agent_id)! : this.team.ensureAgent(p.id, w.role));
-    this.ctx.queue.enqueue({
-      projectId: p.id, kind: 'remediate', role: w.role, agentId: agent.id, workItemId: w.id, idempotencyKey: `remed:${w.id}:${w.remediation_rounds}`,
+    const t = this.ensureFamily({
+      projectId: p.id, kind: 'remediate', role: w.role, agentId: agent.id, workItemId: w.id, idempotencyKey: `remed:${w.id}:e${this.epoch(w, 'remediation')}`,
       input: { round: w.remediation_rounds, reason: w.status_reason, ...data }, complexity: w.remediation_rounds >= 2 ? 'high' : w.complexity, priority: w.priority,
       excludeProviders: fresh && w.implementer_provider ? [w.implementer_provider] : [], workspacePath: this.ws(p).wtPath(w.key),
     });
+    if (!t) this.requestInvestigation(p, w, 'remediation task repeatedly failed or was cancelled');
   }
 
   private ensureReviews(p: ProjectRow, w: WorkItemRow): void {
@@ -251,36 +283,50 @@ export class Workflow {
     const blockingOpen = this.store.findings(p.id, { workItemId: w.id, statuses: ['open', 'fixed_claimed'] }).filter((f) => isBlocking(f.severity));
     const excludeAgents = [w.implementer_agent_id].filter(Boolean) as string[];
     const excludeProviders = this.ctx.cfg.routing.crossProviderReview && w.implementer_provider ? [w.implementer_provider] : [];
+    const ep = this.epoch(w, 'in_review');
+    const fam = (k: string) => `${k}:${w.id}:${head.slice(0, 12)}:e${ep}`;
+    const escalate = (t: TaskRow | null, kind: string) => { if (!t) this.block(p, w, `${kind} repeatedly failed or was cancelled`); };
     if (blockingOpen.length) {
       const reviewerId = blockingOpen[0]!.reviewer_agent_id;
       const reviewer = reviewerId && !excludeAgents.includes(reviewerId) ? this.store.agent(reviewerId)! : this.team.ensureAgent(p.id, 'code_reviewer', { exclude: excludeAgents });
-      this.ctx.queue.enqueue({ projectId: p.id, kind: 'verify_fix', role: reviewer.role, agentId: reviewer.id, workItemId: w.id, idempotencyKey: `verify:${w.id}:${head}`,
-        input: { head, findingIds: blockingOpen.map((f) => f.id), since: blockingOpen[0]!.commit_sha }, readOnly: true, excludeAgents, excludeProviders, complexity: w.complexity, priority: w.priority });
+      escalate(this.ensureFamily({ projectId: p.id, kind: 'verify_fix', role: reviewer.role, agentId: reviewer.id, workItemId: w.id, idempotencyKey: fam('verify'),
+        input: { head, findingIds: blockingOpen.map((f) => f.id), since: blockingOpen[0]!.commit_sha }, readOnly: true, excludeAgents, excludeProviders, complexity: w.complexity, priority: w.priority }), 'verify_fix');
       return;
     }
-    this.job(`reviewplan:${w.id}:${head}`, p.id, async () => {
+    if (this.ctx.queue.latestByPrefix(fam('review'))) {
+      const rev = this.ctx.queue.latestByPrefix(fam('review'))!;
+      escalate(this.ensureFamily({ projectId: p.id, kind: 'review', role: 'code_reviewer', agentId: this.team.ensureAgent(p.id, 'code_reviewer', { exclude: [...excludeAgents, rev.agent_id ?? ''] }).id, workItemId: w.id, idempotencyKey: fam('review'),
+        input: json(rev.input, {}), readOnly: true, excludeAgents, excludeProviders, complexity: w.complexity, priority: w.priority }), 'review');
+      const sec = this.ctx.queue.latestByPrefix(fam('secreview'));
+      if (sec) escalate(this.ensureFamily({ projectId: p.id, kind: 'security_review', role: 'security_engineer', agentId: this.team.ensureAgent(p.id, 'security_engineer', { exclude: [...excludeAgents, sec.agent_id ?? ''] }).id, workItemId: w.id, idempotencyKey: fam('secreview'),
+        input: json(sec.input, {}), readOnly: true, excludeAgents, excludeProviders, complexity: 'high', priority: w.priority }), 'security_review');
+      return;
+    }
+    this.job(`reviewplan:${w.id}:${head}:e${ep}`, p.id, async () => {
       const ws = this.ws(p);
       const files = await ws.changedFiles(ws.wtPath(w.key), p.default_branch, head);
       const d = await ws.diff(ws.wtPath(w.key), p.default_branch, head, 20_000);
       const needsSecurity = securitySensitive(files, d.text) || this.ctx.policy.touchesProtected(files).length > 0 || w.role === 'security_engineer';
       const reviewer = this.team.ensureAgent(p.id, 'code_reviewer', { exclude: excludeAgents });
-      this.ctx.queue.enqueue({ projectId: p.id, kind: 'review', role: 'code_reviewer', agentId: reviewer.id, workItemId: w.id, idempotencyKey: `review:${w.id}:${head}`,
+      this.ctx.queue.enqueue({ projectId: p.id, kind: 'review', role: 'code_reviewer', agentId: reviewer.id, workItemId: w.id, idempotencyKey: fam('review'),
         input: { head, files }, readOnly: true, excludeAgents, excludeProviders, complexity: w.complexity, priority: w.priority });
       if (needsSecurity) {
         const sec = this.team.ensureAgent(p.id, 'security_engineer', { exclude: excludeAgents });
-        this.ctx.queue.enqueue({ projectId: p.id, kind: 'security_review', role: 'security_engineer', agentId: sec.id, workItemId: w.id, idempotencyKey: `secreview:${w.id}:${head}`,
+        this.ctx.queue.enqueue({ projectId: p.id, kind: 'security_review', role: 'security_engineer', agentId: sec.id, workItemId: w.id, idempotencyKey: fam('secreview'),
           input: { head, files }, readOnly: true, excludeAgents, excludeProviders, complexity: 'high', priority: w.priority });
       }
     });
   }
 
   /** After a review-type task completes: decide remediation vs merge once all reviews for the head are in. */
-  private concludeReview(p: ProjectRow, w: WorkItemRow): void {
+  private concludeReview(p: ProjectRow, w: WorkItemRow, currentTaskId: string): void {
     const head = w.head_commit!;
-    const keys = [`review:${w.id}:${head}`, `secreview:${w.id}:${head}`, `verify:${w.id}:${head}`];
-    const tasks = keys.map((k) => this.ctx.queue.byKey(k)).filter((t): t is TaskRow => !!t);
-    if (tasks.some((t) => !['succeeded', 'dead', 'cancelled'].includes(t.status) || (t.status === 'succeeded' && !t.processed && t.kind !== 'verify_fix' && false))) return;
-    if (tasks.some((t) => t.status !== 'succeeded')) return; // dead review handled by onDead
+    const ep = this.epoch(w, 'in_review');
+    const keys = ['review', 'secreview', 'verify'].map((k) => `${k}:${w.id}:${head.slice(0, 12)}:e${ep}`);
+    const tasks = keys.map((k) => this.ctx.queue.latestByPrefix(k)).filter((t): t is TaskRow => !!t);
+    if (!tasks.length) return;
+    // Every sibling must have succeeded AND had its findings recorded (processed), except the one being processed now.
+    if (tasks.some((t) => t.status !== 'succeeded' || (!t.processed && t.id !== currentTaskId))) return;
     const blocking = this.store.findings(p.id, { workItemId: w.id, statuses: ['open', 'fixed_claimed'] }).filter((f) => isBlocking(f.severity));
     if (blocking.length) this.toRemediation(p, w, 'findings', { findingIds: blocking.map((f) => f.id) });
     else if (this.store.transition(w.id, ['in_review'], 'merge_ready', { reviewed_commit: head })) {
@@ -295,14 +341,20 @@ export class Workflow {
     const ws = this.ws(p);
     // Exact-commit invariant: the commit merged is the commit gated and reviewed.
     if (!(w.head_commit && w.head_commit === w.gated_commit && w.head_commit === w.reviewed_commit)) {
-      this.store.transition(w.id, ['merge_ready'], 'gating', {}, 'commit changed after review; re-verifying');
+      this.store.transition(w.id, ['merge_ready'], 'gating', { gated_commit: null }, 'commit changed after review; re-verifying');
       return;
     }
     const blocking = this.store.findings(p.id, { workItemId: w.id, statuses: ['open', 'fixed_claimed'] }).filter((f) => isBlocking(f.severity));
     if (blocking.length) { this.store.transition(w.id, ['merge_ready'], 'in_review'); return; }
 
-    // Bring the default branch into the task branch first so the merged result is what was verified.
     const dir = ws.wtPath(w.key);
+    // Nothing to integrate (e.g. a defect verified as already resolved): record the current default branch as the result.
+    if ((await git(dir, ['merge-base', '--is-ancestor', w.head_commit, p.default_branch], { allowFail: true })).code === 0) {
+      const main = await ws.head();
+      this.store.transition(w.id, ['merge_ready'], 'merged', { merged_commit: main }, 'no changes to integrate (verified no-op)');
+      return;
+    }
+    // Bring the default branch into the task branch first so the merged result is what was verified.
     const before = await ws.head(dir);
     const patchBefore = await patchId(dir, p.default_branch, before);
     const m = await ws.mergeDefaultInto(dir);
@@ -315,7 +367,7 @@ export class Workflow {
       const patchAfter = await patchId(dir, p.default_branch, after);
       // A clean merge that leaves the item's own diff unchanged keeps the review approval; gates re-run.
       const carry = patchBefore && patchBefore === patchAfter ? { reviewed_commit: after } : {};
-      this.store.transition(w.id, ['merge_ready'], 'gating', { head_commit: after, ...carry }, 'updated with default branch; re-running gates');
+      this.store.transition(w.id, ['merge_ready'], 'gating', { head_commit: after, gated_commit: null, ...carry }, 'updated with default branch; re-running gates');
       return;
     }
 
@@ -351,21 +403,33 @@ export class Workflow {
     const approvalKey = `human-review:${p.id}:${w.key}:${w.head_commit}`;
     const appr = this.ctx.policy.status(approvalKey);
     if (appr?.status === 'pending') return;
-    const checks = await gh.checks(w.head_commit);
-    if (checks === 'pending') return;
-    if (checks === 'failure') { this.toRemediation(p, w, 'ci', { pr: w.pr_number }); return; }
-    const r = await gh.merge(w.pr_number, w.head_commit);
-    if (!r.merged) {
-      if (r.needsHuman) {
-        this.ctx.policy.request('human_review_required', `PR #${w.pr_number} (${w.key}) requires a human review per repository rules: ${r.reason}`, { projectId: p.id, requestedBy: 'supervisor', dedup: approvalKey, payload: { pr: w.pr_number } });
-        this.store.patchWorkItem(w.id, { status_reason: `awaiting required human review on PR #${w.pr_number}` });
-      } else this.store.transition(w.id, ['merging'], 'merge_ready', {}, `merge rejected: ${r.reason}`);
-      return;
+    // Idempotent after crashes: an already-merged PR is recorded, a closed one is never reused.
+    const state = await gh.pullState(w.pr_number);
+    if (state.merged) {
+      this.store.transition(w.id, ['merging'], 'merged', { merged_commit: state.mergeSha ?? w.head_commit }, 'PR already merged');
+    } else {
+      if (state.state === 'closed') { gh.forgetPullRequest(w.key); this.store.transition(w.id, ['merging'], 'merge_ready', { pr_number: null }, `PR #${w.pr_number} was closed without merging; opening a new one`); return; }
+      const checks = await gh.checks(w.head_commit);
+      if (checks === 'pending') return;
+      if (checks === 'failure') { this.toRemediation(p, w, 'ci', { pr: w.pr_number }); return; }
+      const r = await gh.merge(w.pr_number, w.head_commit);
+      if (!r.merged) {
+        if (r.needsHuman) {
+          this.ctx.policy.request('human_review_required', `PR #${w.pr_number} (${w.key}) requires a human review per repository rules: ${r.reason}`, { projectId: p.id, requestedBy: 'supervisor', dedup: approvalKey, payload: { pr: w.pr_number } });
+          this.store.patchWorkItem(w.id, { status_reason: `awaiting required human review on PR #${w.pr_number}` });
+        } else {
+          this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'merge_rejected', summary: r.reason });
+          if (this.epoch(w, 'merge_rejected') >= 3) this.block(p, w, `merge rejected 3 times: ${r.reason}`);
+          else this.store.transition(w.id, ['merging'], 'merge_ready', {}, `merge rejected: ${r.reason}`);
+        }
+        return;
+      }
+      // Record the merge before any further network operation so a crash cannot cause a second merge attempt.
+      this.store.transition(w.id, ['merging'], 'merged', { merged_commit: r.sha });
+      this.ctx.events.audit('supervisor', 'github.merge', { projectId: p.id, target: `PR#${w.pr_number}`, detail: { sha: w.head_commit, merge: r.sha } });
     }
     const ws = this.ws(p);
     const main = await ws.syncDefaultFromRemote();
-    this.store.transition(w.id, ['merging'], 'merged', { merged_commit: r.sha });
-    this.ctx.events.audit('supervisor', 'github.merge', { projectId: p.id, target: `PR#${w.pr_number}`, detail: { sha: w.head_commit, merge: r.sha } });
     const s = await runGates(this.ctx, { projectId: p.id, workItemId: w.id, scope: 'post-merge', cwd: ws.integration, commit: main, gates: this.store.settings(p).gates });
     if (!s.passed) this.createDefect(p, { title: `Default branch fails quality gates after merging ${w.key}`, description: failedGateText(s), severity: 'high', paths: json(w.paths, []), source: 'post-merge-gates', acceptance: ['All required quality gates pass on the default branch'] });
   }
@@ -473,11 +537,12 @@ export class Workflow {
   }
 
   private requestInvestigation(p: ProjectRow, w: WorkItemRow, why: string): void {
-    const n = this.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE work_item_id=? AND kind='investigate'", w.id)!.n;
+    if (this.investigationActive(w)) return; // single-flight
+    const n = this.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE work_item_id=? AND kind='investigate' AND status IN ('succeeded','dead')", w.id)!.n;
     if (n >= 3) { this.block(p, w, `repeated failures after ${n} investigations: ${why}`); return; }
     this.ctx.queue.cancelForWorkItem(w.id, 'superseded by investigation');
     this.ctx.queue.enqueue({ projectId: p.id, kind: 'investigate', role: 'engineering_director', agentId: this.team.ensureAgent(p.id, 'engineering_director').id, workItemId: w.id,
-      idempotencyKey: `inv:${w.id}:${n + 1}`, input: { why }, readOnly: true, complexity: 'high', priority: 0 });
+      idempotencyKey: `inv:${w.id}:${this.ctx.queue.countByPrefix(`inv:${w.id}`) + 1}`, input: { why }, readOnly: true, complexity: 'high', priority: 0 });
     this.store.patchWorkItem(w.id, { status_reason: `investigating: ${why}` });
   }
 
@@ -502,8 +567,19 @@ export class Workflow {
       return;
     }
     if (audit.status !== 'running') return;
-    const tasks = ['a', 'b'].map((s) => this.ctx.queue.byKey(`caudit:${audit.id}:${s}`)).filter((t): t is TaskRow => !!t);
-    if (tasks.length < 2 || tasks.some((t) => !['succeeded', 'dead', 'cancelled'].includes(t.status) || (t.status === 'succeeded' && !t.processed))) return;
+    const tasks: TaskRow[] = [];
+    for (const [i, slot] of ['a', 'b'].entries()) {
+      const base = `caudit:${audit.id}:${slot}`;
+      const latest = this.ctx.queue.latestByPrefix(base);
+      if (!latest) return;
+      if (latest.status === 'succeeded') { if (!latest.processed) return; tasks.push(latest); continue; }
+      if (!['dead', 'cancelled', 'failed'].includes(latest.status)) return;
+      // Replace a failed auditor (independent agent, any provider) up to twice before concluding without it.
+      const agent = this.team.ensureAgent(p.id, i === 0 ? 'quality_engineer' : 'code_reviewer', { exclude: [latest.agent_id ?? ''] });
+      const t = this.ensureFamily({ projectId: p.id, kind: 'completion_audit', role: agent.role, agentId: agent.id, idempotencyKey: base, input: json(latest.input, {}), readOnly: true, complexity: 'high', priority: 0 });
+      if (t) return;
+      tasks.push(latest);
+    }
     this.concludeAudit(p, audit.id, audit.commit_sha!, tasks);
   }
 
@@ -517,7 +593,7 @@ export class Workflow {
     const blockingFindings = this.store.findings(p.id, { statuses: ['open', 'fixed_claimed'] }).filter((f) => SEVERITY_RANK[f.severity] >= SEVERITY_RANK.high);
     if (blockingFindings.length) problems.push(`${blockingFindings.length} critical/high findings remain open`);
     const succeeded = tasks.filter((t) => t.status === 'succeeded');
-    if (!succeeded.length) problems.push('no independent auditor completed');
+    if (succeeded.length < 2) problems.push(`independent auditor(s) failed: only ${succeeded.length} of 2 completed`);
     for (const t of succeeded) {
       const o = json<any>(t.output, {});
       for (const r of o.requirements ?? []) {
@@ -534,6 +610,18 @@ export class Workflow {
     for (const r of reqs.filter((x) => x.mandatory)) {
       const covered = (o: TaskRow) => (json<any>(o.output, {}).requirements ?? []).some((x: any) => x.key === r.key);
       if (succeeded.some((t) => !covered(t)) && r.status !== 'blocked') gaps.set(r.key, `${gaps.get(r.key) ?? ''} auditor omitted requirement`.trim());
+    }
+    const declines = succeeded.filter((t) => !json<any>(t.output, {}).release_recommended);
+    const onlyDeclines = !gaps.size && !defects.length && problems.length > 0 && problems.every((x) => x.endsWith('does not recommend release') || x.startsWith('independent auditor(s) failed'));
+    if (onlyDeclines) {
+      // A decline without a concrete unsatisfied requirement or defect is not actionable: re-audit with feedback, then escalate.
+      const prev = this.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM audits WHERE project_id=? AND kind='completion' AND status='inconclusive' AND created_at > COALESCE((SELECT MAX(created_at) FROM audits WHERE project_id=? AND kind='completion' AND status IN ('failed','passed')), 0)", p.id, p.id)!.n;
+      const feedback = declines.map((t) => `${t.provider} auditor declined without concrete findings: ${String(json<any>(t.output, {}).summary).slice(0, 600)}`);
+      this.ctx.db.run("UPDATE audits SET status='inconclusive', result=?, updated_at=? WHERE id=?", JSON.stringify({ ...result, problems, feedback }), this.ctx.clock.now(), auditId);
+      if (prev + 1 >= 2) { this.store.setProjectStatus(p.id, 'blocked', 'completion auditors repeatedly declined release without citing concrete gaps; operator review required'); return; }
+      this.store.setProjectStatus(p.id, 'active', 'completion audit inconclusive; re-auditing with feedback');
+      this.ctx.events.emit('audit.inconclusive', `completion audit inconclusive (decline without concrete findings); re-auditing`, { projectId: p.id, level: 'warn' });
+      return;
     }
     const pass = !problems.length && !gaps.size && !defects.length;
     this.ctx.db.run('UPDATE audits SET status=?, result=?, updated_at=? WHERE id=?', pass ? 'passed' : 'failed',
@@ -616,12 +704,21 @@ export class Workflow {
         const dir = ws.wtPath(w.key);
         const sha = await ws.commitAll(dir, `${task.kind === 'implement' ? 'feat' : 'fix'}(${w.key}): ${(out.summary ?? w.title).split('\n')[0].slice(0, 72)}\n\nAgent: ${task.agent_id} via ${task.provider}\nTask: ${task.id}`);
         const head = await ws.head(dir);
-        if (task.kind === 'implement' && head === w.base_commit) { this.requestInvestigation(p, w, 'implementation produced no changes'); return; }
+        if (task.kind === 'implement' && head === w.base_commit) {
+          if (w.type === 'defect' && out.status === 'completed') {
+            // "Already resolved" is a claim: verify it with gates + independent review instead of trusting it.
+            this.store.transition(w.id, ['implementing'], 'gating', { head_commit: head, gated_commit: null, implementer_provider: task.provider }, 'no change required per implementer; verifying the defect is already resolved');
+            this.store.checkpoint({ projectId: p.id, workItemId: w.id, taskId: task.id, kind: 'implement', summary: `no-change resolution claimed: ${String(out.summary).slice(0, 400)}` });
+            return;
+          }
+          this.requestInvestigation(p, w, 'implementation produced no changes');
+          return;
+        }
         if (task.kind === 'remediate') for (const fid of out.addressed_finding_ids ?? []) {
           const f = this.ctx.db.get<FindingRow>('SELECT * FROM findings WHERE id=? AND work_item_id=?', fid, w.id);
           if (f && f.status === 'open') this.store.setFindingStatus(f.id, 'fixed_claimed', `claimed by ${task.agent_id}: ${out.root_cause}`);
         }
-        this.store.transition(w.id, ['implementing', 'remediation'], 'gating', { head_commit: head, implementer_provider: task.kind === 'implement' ? task.provider : w.implementer_provider });
+        this.store.transition(w.id, ['implementing', 'remediation'], 'gating', { head_commit: head, gated_commit: null, implementer_provider: task.kind === 'implement' ? task.provider : w.implementer_provider });
         this.store.checkpoint({ projectId: p.id, workItemId: w.id, taskId: task.id, kind: task.kind, summary: `${task.kind} by ${task.agent_id}@${task.provider}: ${String(out.summary).slice(0, 600)}${sha ? ` (commit ${sha.slice(0, 8)})` : ''}`, data: { files: out.files_changed, tests: out.tests_added } });
         return;
       }
@@ -631,7 +728,7 @@ export class Workflow {
         for (const f of out.findings ?? []) this.recordFinding(p, task, w, f, 'review');
         this.postOutbound(task, out.messages);
         this.store.checkpoint({ projectId: p.id, workItemId: w.id, taskId: task.id, kind: task.kind, summary: `${task.kind} (${task.provider}) verdict ${out.verdict}: ${String(out.summary).slice(0, 400)}` });
-        if (this.store.workItem(w.id)!.status === 'in_review') this.concludeReview(p, this.store.workItem(w.id)!);
+        if (this.store.workItem(w.id)!.status === 'in_review') this.concludeReview(p, this.store.workItem(w.id)!, task.id);
         return;
       }
       case 'verify_fix': {
@@ -644,7 +741,7 @@ export class Workflow {
         }
         for (const f of out.new_findings ?? []) this.recordFinding(p, task, w, f, 'verify');
         this.postOutbound(task, out.messages);
-        if (this.store.workItem(w.id)!.status === 'in_review') this.concludeReview(p, this.store.workItem(w.id)!);
+        if (this.store.workItem(w.id)!.status === 'in_review') this.concludeReview(p, this.store.workItem(w.id)!, task.id);
         return;
       }
       case 'answer': {
@@ -661,12 +758,13 @@ export class Workflow {
       case 'investigate': {
         if (!w) return;
         this.store.checkpoint({ projectId: p.id, workItemId: w.id, taskId: task.id, kind: 'investigation', summary: `root cause: ${out.root_cause}; strategy: ${out.strategy}`, data: out });
+        if (['done', 'merged', 'cancelled', 'blocked'].includes(this.store.workItem(w.id)!.status)) return;
         if (out.strategy === 'block') { this.block(p, w, out.blocker || out.root_cause); return; }
         const role = out.strategy === 'reassign_specialist' && out.recommended_role ? String(out.recommended_role).toLowerCase().replace(/[^a-z0-9_]+/g, '_') : w.role;
         const n = this.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE work_item_id=? AND kind='implement'", w.id)!.n;
         const agent = this.team.ensureAgent(p.id, role, { exclude: out.strategy === 'retry_same' ? [] : [w.implementer_agent_id ?? ''] });
         this.ctx.db.tx(() => {
-          this.store.transition(w.id, [w.status], 'implementing', { role, remediation_rounds: 0, implementer_agent_id: agent.id }, `restarted after investigation (${out.strategy})`);
+          if (!this.store.transition(w.id, ['implementing', 'remediation', 'gating', 'in_review', 'merge_ready', 'merging'], 'implementing', { role, remediation_rounds: 0, gated_commit: null, implementer_agent_id: agent.id }, `restarted after investigation (${out.strategy})`)) return;
           this.ctx.queue.enqueue({ projectId: p.id, kind: 'implement', role, agentId: agent.id, workItemId: w.id, idempotencyKey: `impl:${w.id}:${n + 1}`,
             input: { round: n + 1, guidance: `${out.guidance}\nRoot cause of earlier failures: ${out.root_cause}` }, complexity: 'high', priority: w.priority,
             excludeProviders: out.strategy !== 'retry_same' && w.implementer_provider ? [w.implementer_provider] : [], workspacePath: this.ws(p).wtPath(w.key) });
@@ -758,17 +856,8 @@ export class Workflow {
       case 'plan': this.store.setProjectStatus(p.id, 'blocked', `planning failed: ${task.error_message}`); return;
       case 'implement': case 'remediate': if (w) this.requestInvestigation(p, w, `${task.kind} failed: ${task.error_class} ${task.error_message?.slice(0, 300)}`); return;
       case 'investigate': if (w) this.block(p, w, `investigation failed: ${task.error_message}`); return;
-      case 'review': case 'security_review': case 'verify_fix': {
-        if (!w) return;
-        const n = this.ctx.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM tasks WHERE work_item_id=? AND kind=? AND status=?', w.id, task.kind, 'dead')!.n;
-        if (n >= 3) { this.block(p, w, `${task.kind} repeatedly failed`); return; }
-        this.ctx.queue.enqueue({ projectId: p.id, kind: task.kind, role: task.role, agentId: this.team.ensureAgent(p.id, task.role, { exclude: [task.agent_id ?? '', w.implementer_agent_id ?? ''] }).id, workItemId: w.id,
-          idempotencyKey: `${task.idempotency_key}:retry${n}`, input: json(task.input, {}), readOnly: true, excludeAgents: [w.implementer_agent_id ?? ''], complexity: task.complexity, priority: task.priority });
-        // Retried reviews keep their original idempotency family for concludeReview:
-        this.ctx.db.run('UPDATE tasks SET idempotency_key=? WHERE id=?', `${task.idempotency_key}:dead${n}`, task.id);
-        this.ctx.db.run('UPDATE tasks SET idempotency_key=? WHERE idempotency_key=?', task.idempotency_key, `${task.idempotency_key}:retry${n}`);
-        return;
-      }
+      case 'review': case 'security_review': case 'verify_fix':
+        return; // ensureReviews replaces dead review tasks (bounded) and blocks the item when exhausted
       case 'answer': {
         const q = this.bus.get(json<{ messageId: string }>(task.input, { messageId: '' }).messageId);
         if (q) {
@@ -857,6 +946,9 @@ export class Workflow {
         extra.requirements = this.store.requirements(p.id).map((r) => `- ${r.key}${r.mandatory ? ' (mandatory)' : ''} [${r.status}] ${r.title}\n  acceptance: ${json<string[]>(r.acceptance, []).join('; ')}\n  evidence: ${json<unknown[]>(r.evidence, []).slice(-4).map((e) => JSON.stringify(e)).join('; ')}${r.blocker ? `\n  BLOCKER: ${r.blocker}` : ''}`).join('\n');
         extra.gates = gateEvidence(this.ctx, p.id, input.commit).map((g) => `- ${g.name}: ${g.status} (\`${g.command}\`)`).join('\n') || '(no gate results)';
         extra.findings = this.store.findings(p.id, { statuses: ['open', 'fixed_claimed'] }).map((f) => `- [${f.severity}] ${f.title}`).join('\n');
+        const last = this.ctx.db.get<{ result: string }>("SELECT result FROM audits WHERE project_id=? AND kind='completion' AND status='inconclusive' ORDER BY created_at DESC LIMIT 1", p.id);
+        const fb = json<{ feedback?: string[] }>(last?.result, {}).feedback;
+        if (fb?.length) extra['Feedback from the previous inconclusive audit'] = fb.map((f) => `- ${f}`).join('\n') + '\nDeclining release now requires citing a specific unsatisfied requirement key or a defect with evidence.';
         break;
       }
       default:

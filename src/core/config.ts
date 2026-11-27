@@ -44,10 +44,10 @@ export interface Config {
     checksTimeoutMin: number; requireChecks: boolean;
   };
   security: {
-    allowedRepos: string[]; sandbox: 'auto' | 'bwrap' | 'none'; gateNetwork: boolean;
+    allowedRepos: string[]; sandbox: 'auto' | 'bwrap' | 'none'; agentSandbox?: 'auto' | 'bwrap' | 'none'; gateNetwork: boolean;
     approvalRequiredFor: string[]; protectedPathGlobs: string[];
   };
-  dashboard: { host: string; port: number; tokenHash: string | null; sessionHours: number };
+  dashboard: { host: string; port: number; tokenHash: string | null; sessionHours: number; trustProxy?: boolean };
   logging: { level: 'debug' | 'info' | 'warn' | 'error'; maxBytes: number; keep: number };
 }
 
@@ -93,7 +93,7 @@ export function defaultConfig(home = defaultHome()): Config {
       checksTimeoutMin: 60, requireChecks: true,
     },
     security: {
-      allowedRepos: [], sandbox: 'auto', gateNetwork: false,
+      allowedRepos: [], sandbox: 'auto', agentSandbox: 'auto', gateNetwork: false,
       approvalRequiredFor: ['production_deploy', 'destructive_operation', 'protected_infrastructure', 'unrelated_repository',
         'credential_expansion', 'additional_spending', 'public_publication', 'security_policy_change'],
       protectedPathGlobs: ['.github/workflows/**', '**/.env', '**/*.pem', '**/id_rsa*'],

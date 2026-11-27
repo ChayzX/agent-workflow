@@ -154,6 +154,20 @@ export class TaskQueue {
     this.db.run('UPDATE tasks SET input=?, updated_at=? WHERE id=?', JSON.stringify(input), this.clock.now(), taskId);
   }
 
+  /** Latest task of an idempotency-key family (exact key or `key:<suffix>` retries). */
+  latestByPrefix(base: string): TaskRow | undefined {
+    return this.db.get<TaskRow>('SELECT * FROM tasks WHERE idempotency_key = ? OR substr(idempotency_key, 1, ?) = ? ORDER BY created_at DESC, rowid DESC LIMIT 1', base, base.length + 1, base + ':');
+  }
+  countByPrefix(base: string): number {
+    return this.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM tasks WHERE idempotency_key = ? OR substr(idempotency_key, 1, ?) = ?', base, base.length + 1, base + ':')!.n;
+  }
+
+  /** Operator cancellation: only affects tasks that have not finished (never overwrites a recorded outcome). */
+  cancel(taskId: string, reason: string): boolean {
+    return this.db.run(`UPDATE tasks SET status='cancelled', error_class='interrupted', error_message=?, lease_owner=NULL, lease_expires_at=NULL, updated_at=?
+      WHERE id=? AND status IN ('queued','running','waiting_message','waiting_capacity')`, reason.slice(0, 500), this.clock.now(), taskId).changes === 1;
+  }
+
   cancelForWorkItem(workItemId: string, reason: string): number {
     return this.db.run(
       `UPDATE tasks SET status='cancelled', error_message=?, updated_at=? WHERE work_item_id=? AND status IN ('queued','waiting_message','waiting_capacity')`,
