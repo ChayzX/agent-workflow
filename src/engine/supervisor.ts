@@ -103,6 +103,10 @@ export class Supervisor {
 
   async sandboxSelfCheck(): Promise<void> {
     this.claudeState.snapshot();
+    if (this.ctx.cfg.security.sandbox === 'none') {
+      this.ctx.events.emit('security.sandbox', 'quality-gate sandbox disabled by configuration (security.sandbox="none"): gate commands run unconfined', { level: 'warn' });
+      this.ctx.events.audit('supervisor', 'security.gate_sandbox_disabled', {});
+    }
     let mode: 'bwrap' | 'none';
     try { mode = agentSandboxMode(this.ctx.cfg); } catch (e) {
       // Fail closed: no agent runs until confinement works or the operator explicitly opts out (agentSandbox="none").

@@ -302,9 +302,12 @@ async function main(): Promise<number> {
 }
 
 function sandboxAdvice(cfg: Config): string {
-  const off = [cfg.security.sandbox === 'none' ? 'gates' : '', cfg.security.agentSandbox === 'none' ? 'agents' : ''].filter(Boolean);
-  return `bubblewrap cannot create a sandbox here: ${off.length === 2 ? 'sandboxing is disabled by configuration, so agents and gates run unconfined'
-    : 'agents and quality gates will NOT run (fail closed)'}. Install "bubblewrap"; on Ubuntu 24.04 also allow its user namespaces (docs/troubleshooting.md). `
+  const gatesOff = cfg.security.sandbox === 'none'; const agentsOff = cfg.security.agentSandbox === 'none';
+  const effect = gatesOff && agentsOff ? 'sandboxing is disabled by configuration, so agents and gates run unconfined'
+    : gatesOff ? 'agents will NOT run (fail closed); gates run unconfined by configuration'
+    : agentsOff ? 'quality gates will NOT run (fail closed); agents run unconfined by configuration'
+    : 'agents and quality gates will NOT run (fail closed)';
+  return `bubblewrap cannot create a sandbox here: ${effect}. Install "bubblewrap"; on Ubuntu 24.04 also allow its user namespaces (docs/troubleshooting.md). `
     + 'Under systemd, do not set PrivateTmp in user units or ProtectKernelTunables/ProtectKernelLogs.';
 }
 

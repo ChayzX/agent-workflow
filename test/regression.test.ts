@@ -607,7 +607,18 @@ test('operator verification #31: rejected pushes never retry in a tight loop (sc
     }
     assert.deepEqual(delays, [30_000, 60_000, 120_000, 240_000], 'exponential backoff');
     assert.equal(wf.store.workItemByKey(p0.id, 'W-003')!.status, 'merge_ready');
+    // While backing off, the item does not take the project's integration slot (other items are not starved).
+    const jobs = (wf as any).jobs as Map<string, Promise<void>>;
+    h.ctx.db.run("UPDATE projects SET status='active' WHERE id=?", p0.id);
+    (wf as any).advanceActive(wf.store.project(p0.id)!);
+    assert.equal(jobs.has(`integration:${p0.id}`), false, 'no integration job for an item in backoff');
+    // A successful push ends the streak: the count is consecutive, not cumulative.
+    h.ctx.db.run('INSERT INTO checkpoints(id, project_id, work_item_id, task_id, kind, summary, data, created_at) VALUES (?,?,?,?,?,?,?,?)', 'ck-ok', p0.id, w.id, null, 'push_ok', 'ok', '{}', h.clock.now());
+    h.clock.advance(1);
     (wf as any).onPushFailure(proj, w, 'error: RPC failed; curl 56 connection reset');
+    assert.equal(wf.store.workItemByKey(p0.id, 'W-003')!.status, 'merge_ready', 'streak restarted after a successful push');
+    assert.equal(((wf as any).pushRetryAt.get(w.id) as number) - h.clock.now(), 30_000);
+    for (let i = 0; i < 4; i++) { h.clock.advance(1); (wf as any).onPushFailure(proj, w, 'error: RPC failed; curl 56 connection reset'); }
     assert.equal(wf.store.workItemByKey(p0.id, 'W-003')!.status, 'blocked', 'blocked after 5 consecutive failures');
   } finally { h.cleanup(); }
 });
@@ -678,4 +689,23 @@ test('PR #63 review B1: a standalone CLI binary directly in the home never re-ex
   const out = execFileSync(w.cmd, w.args, { encoding: 'utf8', env: { PATH: process.env.PATH!, HOME: home } });
   assert.match(out, /ran/, 'the standalone binary still runs');
   assert.doesNotMatch(out, /SSH-PRIVATE|TOKEN-SECRET/, 'secrets stay hidden');
+});
+
+test('PR #63 review B2: the reconcile revert path forces a re-sync (updated_at bumped) and audits', async () => {
+  const h = makeHarness(demoBehaviour());
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    const wf = h.sup.workflow; const proj = wf.store.project(p0.id)!;
+    await drive(h, (x) => !!wf.store.workItemByKey(p0.id, 'W-003'), p0.id, { maxTicks: 200 });
+    const w3 = wf.store.workItemByKey(p0.id, 'W-003')!;
+    let synced = 0;
+    (h.ctx as any).github = () => ({ reconcileExternal: async () => [{ key: 'W-003', change: 'closed' }], syncAll: async () => { synced++; } });
+    const before = wf.store.workItemByKey(p0.id, 'W-003')!.updated_at;
+    (wf as any).lastSync.delete(p0.id);
+    (wf as any).syncGitHub(proj);
+    await wf.drainJobs();
+    assert.ok(wf.store.workItemByKey(p0.id, 'W-003')!.updated_at > before, 'updated_at bumped so syncAll rewrites the issue');
+    assert.equal(synced, 1);
+    assert.ok(h.ctx.db.get("SELECT 1 FROM audit_log WHERE action='workitem.external_change_reverted' AND target=?", w3.key));
+  } finally { await h.sup.workflow.drainJobs(); h.cleanup(); }
 });

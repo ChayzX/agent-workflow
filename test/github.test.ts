@@ -207,3 +207,39 @@ test('github (operator verification #32): PR body closes its issue on merge', as
   assert.equal(fake.s.pulls.length, 1);
   assert.match(String((fake.s.pulls[0] as any).body), /^Closes #\d+\./);
 });
+
+test('github (PR #63 review B2/N1/N2): a reverted close is reported once and restored; Closes-#N merges and pre-tracking mappings are not misread', async () => {
+  const { db, store, fake, sync, clock } = setup();
+  await sync.syncAll(store);
+  const wi = (k: string) => store.workItemByKey('p', k)!;
+  const issue = (k: string) => fake.s.issues.find((i) => i.title.startsWith(k))!;
+  // B2: closed as completed while the item is still being worked: reported, then the forced re-sync reopens it, once.
+  store.patchWorkItem(wi('W-002').id, { status: 'blocked' });
+  clock.advance(10); await sync.syncAll(store);
+  issue('W-002').state = 'closed'; issue('W-002').state_reason = 'completed';
+  clock.advance(10);
+  assert.deepEqual(await sync.reconcileExternal(store), [{ key: 'W-002', change: 'closed' }]);
+  db.run('UPDATE work_items SET updated_at=? WHERE id=?', clock.now() + 1, wi('W-002').id); // what the workflow handler does
+  await sync.syncAll(store);
+  assert.equal(issue('W-002').state, 'open', 'issue state restored on GitHub');
+  clock.advance(10);
+  assert.deepEqual(await sync.reconcileExternal(store), [], 'reported once, not every sync');
+  // N2: "Closes #N" closes the issue when the PR merges, before the supervisor sees the merge: not a human change.
+  store.patchWorkItem(wi('W-001').id, { status: 'merging' });
+  clock.advance(10); await sync.syncAll(store);
+  issue('W-001').state = 'closed'; issue('W-001').state_reason = 'completed';
+  clock.advance(10);
+  assert.deepEqual(await sync.reconcileExternal(store), []);
+  store.patchWorkItem(wi('W-001').id, { status: 'merged' });
+  clock.advance(10);
+  assert.deepEqual(await sync.reconcileExternal(store), [], 'merged + closed is consistent');
+  // N1: mappings written before state tracking (no extra.state) still honour a human close-as-not-planned...
+  db.run("UPDATE github_objects SET extra='{}' WHERE kind='work-item'");
+  store.patchWorkItem(wi('W-002').id, { status: 'backlog' });
+  issue('W-002').state = 'closed'; issue('W-002').state_reason = 'not_planned';
+  clock.advance(10);
+  assert.deepEqual(await sync.reconcileExternal(store), [{ key: 'W-002', change: 'closed_not_planned' }]);
+  // ...but never read "merged locally, issue still open" as a reopen.
+  issue('W-001').state = 'open';
+  assert.ok(!(await sync.reconcileExternal(store)).some((c) => c.key === 'W-001'));
+});

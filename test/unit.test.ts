@@ -338,3 +338,18 @@ test('capacity (operator verification): a usage limit without a reset time is co
   assert.equal(probes, 2, 'one early probe only');
   db.close();
 });
+
+test('capacity (PR #63 review N5): an early probe answering "limited" without a reset keeps the estimate (no double backoff)', async () => {
+  const { CapacityManager } = await import('../src/engine/capacity.js');
+  const db = new Db(':memory:');
+  const clock = new ManualClock(Date.UTC(2026, 10, 27, 23, 30, 0));
+  const cap = new CapacityManager(db, clock, defaultConfig('/tmp/x'), new EventLog(db, clock));
+  const adapter: any = { capabilities: () => ({ capacityProbe: 'non-model' }), probeCapacity: async () => ({ available: false, resetAt: null, windows: [], detail: 'auth_required' }) };
+  cap.recordFailure('codex', { cls: 'usage_limit', message: 'limit' });
+  const est = cap.get('codex');
+  await cap.tick(new Map([['codex', adapter]]));
+  const after = cap.get('codex');
+  assert.equal(after.reset_at, est.reset_at, 'estimate unchanged');
+  assert.equal(after.backoff_level, est.backoff_level, 'backoff not escalated twice');
+  db.close();
+});

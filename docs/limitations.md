@@ -43,7 +43,7 @@ Stated plainly so nothing is over-claimed. See `docs/acceptance-matrix.md` for w
 ## Security
 - **Confinement requires bubblewrap.** Without a working bubblewrap the supervisor refuses to run agents and gates
   (fail closed). Setting `security.sandbox` / `security.agentSandbox` to `"none"` runs them unconfined with only a
-  scrubbed environment; that choice is audited at every start. See `docs/security.md`.
+  scrubbed environment; each opt-out is written to the audit log at every supervisor start. See `docs/security.md`.
 - **The dashboard has a single operator token** and no RBAC. Keep it on loopback or behind TLS.
 - **HawkScan DAST was not run in the build environment** (installing the CLI was not permitted there). A manual probe of
   authentication, CSRF, headers, input limits, traversal and throttling was run, and two issues it found were fixed.

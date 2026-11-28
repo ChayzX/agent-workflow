@@ -200,16 +200,17 @@ export class CapacityManager {
       if ((s.status === 'exhausted' || s.status === 'throttled') && s.reset_at && (s.reset_at <= now || probeSoon)) {
         if (adapter.capabilities().capacityProbe === 'non-model') {
           const p = await adapter.probeCapacity().catch(() => null);
+          const early = probeSoon && s.reset_at > now;
+          if (early && !(p?.available === false && p.resetAt && p.resetAt > now)) {
+            // Early probe: only a provider-reported reset replaces the estimate. "Available" right after the provider refused
+            // work is not trusted (it would flap), and "limited, no reset" must not escalate the backoff a second time.
+            this.db.run('UPDATE provider_state SET details=? WHERE provider=?', JSON.stringify({ ...json(s.details, {}), probeSoon: false }), id);
+            continue;
+          }
           if (p?.available === false) {
             const resetAt = p.resetAt && p.resetAt > now ? p.resetAt : null;
             const kind = p.windows.find((w) => w.status === 'rejected')?.window ?? s.limit_kind ?? 'unknown';
             this.markExhausted(id, { cls: 'usage_limit', message: p.detail ?? 'probe: still limited', resetAt, resetSource: resetAt ? 'provider' : 'none', limitKind: kind });
-            continue;
-          }
-          if (probeSoon && s.reset_at > now) {
-            // Early probe: only a provider-reported reset (handled above) replaces the estimate. "Available" right after the
-            // provider refused work is not trusted (it would flap); keep the estimate and probe again when it passes.
-            this.db.run('UPDATE provider_state SET details=? WHERE provider=?', JSON.stringify({ ...json(s.details, {}), probeSoon: false }), id);
             continue;
           }
           if (p?.windows.length) this.db.run('UPDATE provider_state SET windows=? WHERE provider=?', JSON.stringify(mergeWindows(json(s.windows, {}), p.windows)), id);

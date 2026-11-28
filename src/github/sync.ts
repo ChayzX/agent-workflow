@@ -261,10 +261,15 @@ export class GitHubSync {
     for (const w of store.workItems(this.projectId)) {
       const i = marked.get(`work-item:${w.key}`);
       if (!i) continue;
-      // Compare GitHub with the state the orchestrator itself last synced, not with local status: right after a merge the
-      // item is closed locally while its issue is still open until the next sync — that is not a human reopening it.
-      const last = json<{ state?: string }>(this.mapped('work-item', w.key)?.extra, {}).state;
-      if (!last || i.state === last) continue;
+      // A change is human only if GitHub differs from BOTH the state the orchestrator last synced and the state the
+      // item's local status implies. That rules out the window right after a merge (local closed, issue not yet closed
+      // by the next sync) and "Closes #N" closing the issue when the PR merges (GitHub closed, local still merging).
+      const implied = ['merged', 'done', 'cancelled'].includes(w.status) ? 'closed' : 'open';
+      const recorded = json<{ state?: string }>(this.mapped('work-item', w.key)?.extra, {}).state;
+      if (i.state === implied) continue;
+      if (recorded && i.state === recorded) continue;
+      if (!recorded && i.state === 'open') continue; // mapping from before state tracking: the next sync closes it
+      if (w.status === 'merging' && i.state === 'closed' && i.state_reason !== 'not_planned') continue; // PR merge pending detection
       if (i.state === 'closed') changes.push({ key: w.key, change: i.state_reason === 'not_planned' ? 'closed_not_planned' : 'closed' });
       else changes.push({ key: w.key, change: 'reopened' });
     }

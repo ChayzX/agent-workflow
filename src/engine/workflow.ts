@@ -150,7 +150,9 @@ export class Workflow {
         case 'gating': if (w.head_commit && w.gated_commit !== w.head_commit) this.job(`gate:${w.id}:${w.head_commit}`, p.id, () => this.gate(p, w)); break;
         case 'in_review': this.ensureReviews(p, w); break;
         case 'remediation': this.ensureRemediation(p, w); break;
-        case 'merge_ready': this.job(`integration:${p.id}`, p.id, () => this.merge(p, w)); break; // integration-worktree ops serialized per project
+        case 'merge_ready':
+          if ((this.pushRetryAt.get(w.id) ?? 0) > this.ctx.clock.now()) break; // backing off: leave the integration slot to other items
+          this.job(`integration:${p.id}`, p.id, () => this.merge(p, w)); break; // integration-worktree ops serialized per project
         case 'merging': {
           // Never let one PR monopolize the per-project integration job (fairness) or poll GitHub every tick.
           const appr = this.ctx.policy.status(`human-review:${p.id}:${w.key}:${w.head_commit}`);
@@ -280,9 +282,17 @@ export class Workflow {
   }
 
   /** Monotonic per-item counter (number of times the item entered a phase) used to version task keys. */
-  private epoch(w: WorkItemRow, kind: string, sinceUnblock = false): number {
-    const since = sinceUnblock ? " AND created_at > COALESCE((SELECT MAX(created_at) FROM checkpoints WHERE work_item_id=? AND kind='operator_unblock'), 0)" : '';
-    return this.ctx.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM checkpoints WHERE work_item_id=? AND kind=?${since}`, ...(sinceUnblock ? [w.id, kind, w.id] : [w.id, kind]))!.n;
+  /**
+   * Count checkpoints of `kind` for an item. With `sinceReset`, count only those after the latest operator unblock or
+   * human reopen (per-item limits restart there); `alsoResetOn` adds kinds that end a streak (e.g. a successful push).
+   */
+  private epoch(w: WorkItemRow, kind: string, sinceReset = false, alsoResetOn: string[] = []): number {
+    const resets = sinceReset ? ['operator_unblock', 'reopened', ...alsoResetOn] : alsoResetOn;
+    if (!resets.length) return this.ctx.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM checkpoints WHERE work_item_id=? AND kind=?', w.id, kind)!.n;
+    const marks = resets.map(() => '?').join(',');
+    return this.ctx.db.get<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM checkpoints WHERE work_item_id=? AND kind=? AND created_at > COALESCE((SELECT MAX(created_at) FROM checkpoints WHERE work_item_id=? AND kind IN (${marks})), 0)`,
+      w.id, kind, w.id, ...resets)!.n;
   }
 
   /**
@@ -394,7 +404,9 @@ export class Workflow {
   // ---------------------------------------------------------------- merge
   /**
    * A rejected push is never retried in a tight loop. Credential/permission rejections block the item at once with the
-   * exact operator action; other failures back off exponentially (30 s → 30 min) and block after 5 consecutive failures.
+   * exact operator action; other failures back off (30 s, 1, 2, 4 min) and block after 5 consecutive failures (a
+   * successful push, an operator unblock or a human reopen ends the streak). While backing off, the item does not take
+   * the project's integration slot.
    */
   private onPushFailure(p: ProjectRow, w: WorkItemRow, message: string): void {
     this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'push_failed', summary: message.slice(0, 1000) });
@@ -407,7 +419,7 @@ export class Workflow {
       this.block(p, w, `GitHub rejected the push credentials (${message.slice(0, 160)}). Check the token in ORCH_HOME/secrets/github-token (classic PAT: repo, project, workflow scopes), then run \`orchestrator unblock ${w.key} --note "token fixed"\``);
       return;
     }
-    const n = this.epoch(w, 'push_failed', true);
+    const n = this.epoch(w, 'push_failed', true, ['push_ok']);
     if (n >= 5) { this.block(p, w, `push failed ${n} times since the last operator unblock: ${message.slice(0, 200)}`); return; }
     this.pushRetryAt.set(w.id, this.ctx.clock.now() + Math.min(30 * 60_000, 30_000 * 2 ** (n - 1)));
   }
@@ -454,7 +466,7 @@ export class Workflow {
       if ((this.pushRetryAt.get(w.id) ?? 0) > this.ctx.clock.now()) return; // backing off after a failed push
       try {
         await ws.push(w.branch!, true);
-        this.pushRetryAt.delete(w.id);
+        if (this.pushRetryAt.delete(w.id)) this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'push_ok', summary: 'push succeeded after earlier failures' });
       } catch (e) {
         this.onPushFailure(p, w, (e as Error).message);
         return;
@@ -523,7 +535,7 @@ export class Workflow {
 
   /** GitHub mode: the local default branch must match the remote and pass gates before an item is done. */
   private async postMergeVerify(p: ProjectRow, w: WorkItemRow): Promise<void> {
-    if (this.epoch(w, 'post_merge_verified') > 0) return;
+    if (this.epoch(w, 'post_merge_verified', true) > 0) return; // a reopened/unblocked item is verified again on its next merge
     const ws = this.ws(p);
     const main = await ws.syncDefaultFromRemote(); // throws → job error → retried next tick (item stays merged)
     const s = await runGates(this.ctx, { projectId: p.id, workItemId: w.id, scope: 'post-merge', cwd: ws.integration, commit: main, gates: this.store.settings(p).gates, gitDir: this.ws(p).bare });
@@ -614,12 +626,14 @@ export class Workflow {
         } else if (c.change === 'reopened' && ['cancelled', 'merged', 'done'].includes(w.status)) {
           // A human reopened an issue the orchestrator had closed: the work is wanted (again). Dependencies re-resolve.
           this.store.transition(w.id, [w.status], 'backlog', { remediation_rounds: 0 }, `reopened on GitHub (was ${w.status})`);
+          this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'reopened', summary: `reopened on GitHub (was ${w.status}); per-item limits and post-merge verification restart` });
           this.ctx.events.audit('github', 'workitem.reopened', { projectId: p.id, target: w.key, detail: { from: w.status } });
           this.ctx.events.emit('workitem.reopened', `${w.key} reopened on GitHub (was ${w.status})`, { projectId: p.id, level: 'warn' });
         } else {
           // Anything else (closed as completed without verification, descoping work already being integrated, a reopen of
           // an item that is still in progress): local state is authoritative; the next sync restores the issue state.
-          this.store.patchWorkItem(w.id, {});
+          // Force the next sync to rewrite the issue (an empty patch would not bump updated_at), so this is reported once.
+          this.ctx.db.run('UPDATE work_items SET updated_at=? WHERE id=?', this.ctx.clock.now() + 1, w.id);
           this.ctx.events.audit('github', 'workitem.external_change_reverted', { projectId: p.id, target: w.key, detail: { change: c.change, status: w.status } });
           this.ctx.events.emit('github.warn', `${w.key}: ${c.change.replace(/_/g, ' ')} on GitHub ignored while ${w.status}; issue state will be restored`, { projectId: p.id, level: 'warn' });
         }
@@ -644,7 +658,7 @@ export class Workflow {
   private requestInvestigation(p: ProjectRow, w: WorkItemRow, why: string): void {
     if (['done', 'merged', 'cancelled', 'blocked'].includes(this.store.workItem(w.id)?.status ?? 'cancelled')) return;
     if (this.investigationActive(w)) return; // single-flight
-    const n = this.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE work_item_id=? AND kind='investigate' AND status IN ('succeeded','dead') AND created_at > COALESCE((SELECT MAX(created_at) FROM checkpoints WHERE work_item_id=? AND kind='operator_unblock'), 0)", w.id, w.id)!.n;
+    const n = this.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE work_item_id=? AND kind='investigate' AND status IN ('succeeded','dead') AND created_at > COALESCE((SELECT MAX(created_at) FROM checkpoints WHERE work_item_id=? AND kind IN ('operator_unblock','reopened')), 0)", w.id, w.id)!.n;
     if (n >= 3) { this.block(p, w, `repeated failures after ${n} investigations: ${why}`); return; }
     this.ctx.queue.cancelForWorkItem(w.id, 'superseded by investigation');
     this.ctx.queue.enqueue({ projectId: p.id, kind: 'investigate', role: 'engineering_director', agentId: this.team.ensureAgent(p.id, 'engineering_director').id, workItemId: w.id,
