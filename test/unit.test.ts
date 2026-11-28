@@ -310,3 +310,31 @@ test('systemd units keep settings that break bubblewrap out (operator verificati
   assert.match(sys, /^NoNewPrivileges=yes$/m);
   assert.match(sys, /^ProtectSystem=strict$/m);
 });
+
+test('capacity (operator verification): a usage limit without a reset time is corrected by an immediate usage-free probe; an early "available" is not trusted', async () => {
+  const { CapacityManager } = await import('../src/engine/capacity.js');
+  const db = new Db(':memory:');
+  const clock = new ManualClock(Date.UTC(2026, 10, 27, 23, 30, 0));
+  const cap = new CapacityManager(db, clock, defaultConfig('/tmp/x'), new EventLog(db, clock));
+  const providerReset = Date.UTC(2026, 10, 28, 2, 32, 39);
+  let answer: any = { available: false, resetAt: providerReset, windows: [{ window: 'primary_300m', status: 'rejected', resetsAt: providerReset }] };
+  let probes = 0;
+  const adapter: any = { capabilities: () => ({ capacityProbe: 'non-model' }), probeCapacity: async () => { probes++; return answer; } };
+  cap.recordFailure('codex', { cls: 'usage_limit', message: 'You have hit your usage limit.' });
+  assert.equal(cap.get('codex').reset_source, 'backoff', 'estimated first');
+  await cap.tick(new Map([['codex', adapter]]));
+  assert.equal(probes, 1, 'probed at once, not after the backoff');
+  assert.equal(cap.get('codex').reset_at, providerReset);
+  assert.equal(cap.get('codex').reset_source, 'provider');
+  assert.equal(cap.get('codex').limit_kind, 'primary_300m');
+  await cap.tick(new Map([['codex', adapter]]));
+  assert.equal(probes, 1, 'no repeated early probes once the provider reset is known');
+  // Early probe that claims capacity right after a refusal: keep the estimate, do not flap.
+  cap.recordFailure('claude', { cls: 'usage_limit', message: 'limit' });
+  answer = { available: true, resetAt: null, windows: [] };
+  await cap.tick(new Map([['claude', adapter]]));
+  assert.equal(cap.get('claude').status, 'exhausted');
+  await cap.tick(new Map([['claude', adapter]]));
+  assert.equal(probes, 2, 'one early probe only');
+  db.close();
+});

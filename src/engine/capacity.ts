@@ -141,7 +141,8 @@ export class CapacityManager {
           this.events.emit('provider.model_limit', `${provider}: model ${f.model} limited until ${new Date(ml[f.model]!).toISOString()}`, { level: 'warn' });
           return;
         }
-        this.markExhausted(provider, f);
+        // No reset time in the failure: estimate with backoff, but ask a usage-free probe for the real reset right away.
+        this.markExhausted(provider, f, !f.resetAt);
         return;
       case 'rate_limit': {
         const until = f.resetAt ?? this.clock.now() + 60_000 * Math.min(2 ** s.consecutive_failures, 15);
@@ -162,7 +163,7 @@ export class CapacityManager {
     }
   }
 
-  private markExhausted(provider: ProviderId, f: ExecFailure): void {
+  private markExhausted(provider: ProviderId, f: ExecFailure, probeSoon = false): void {
     const s = this.get(provider);
     const now = this.clock.now();
     const level = f.resetAt ? s.backoff_level : s.backoff_level + 1;
@@ -171,6 +172,7 @@ export class CapacityManager {
     this.set(provider, {
       status: 'exhausted', reset_at: resetAt, reset_source: f.resetAt ? (f.resetSource ?? 'provider') : 'backoff', limit_kind: f.limitKind ?? 'unknown',
       backoff_level: level, failures: s.failures + 1, consecutive_failures: s.consecutive_failures + 1, next_probe_at: resetAt,
+      details: JSON.stringify({ ...json<Record<string, unknown>>(s.details, {}), probeSoon }),
     }, `usage limit (${f.limitKind ?? 'unknown'})`);
   }
 
@@ -194,12 +196,20 @@ export class CapacityManager {
     for (const [id, adapter] of adapters) {
       if (!this.cfg.providers[id]?.enabled) continue;
       const s = this.get(id);
-      if ((s.status === 'exhausted' || s.status === 'throttled') && s.reset_at && s.reset_at <= now) {
+      const probeSoon = s.status === 'exhausted' && !!json<{ probeSoon?: boolean }>(s.details, {}).probeSoon && adapter.capabilities().capacityProbe === 'non-model';
+      if ((s.status === 'exhausted' || s.status === 'throttled') && s.reset_at && (s.reset_at <= now || probeSoon)) {
         if (adapter.capabilities().capacityProbe === 'non-model') {
           const p = await adapter.probeCapacity().catch(() => null);
           if (p?.available === false) {
             const resetAt = p.resetAt && p.resetAt > now ? p.resetAt : null;
-            this.markExhausted(id, { cls: 'usage_limit', message: p.detail ?? 'probe: still limited', resetAt, resetSource: resetAt ? 'provider' : 'none', limitKind: s.limit_kind });
+            const kind = p.windows.find((w) => w.status === 'rejected')?.window ?? s.limit_kind ?? 'unknown';
+            this.markExhausted(id, { cls: 'usage_limit', message: p.detail ?? 'probe: still limited', resetAt, resetSource: resetAt ? 'provider' : 'none', limitKind: kind });
+            continue;
+          }
+          if (probeSoon && s.reset_at > now) {
+            // Early probe: only a provider-reported reset (handled above) replaces the estimate. "Available" right after the
+            // provider refused work is not trusted (it would flap); keep the estimate and probe again when it passes.
+            this.db.run('UPDATE provider_state SET details=? WHERE provider=?', JSON.stringify({ ...json(s.details, {}), probeSoon: false }), id);
             continue;
           }
           if (p?.windows.length) this.db.run('UPDATE provider_state SET windows=? WHERE provider=?', JSON.stringify(mergeWindows(json(s.windows, {}), p.windows)), id);

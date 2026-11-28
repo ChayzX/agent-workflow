@@ -22,7 +22,26 @@ if [ ${#missing[@]} -gt 0 ]; then
   echo "  missing: ${missing[*]}"
   if command -v apt-get >/dev/null && ask "Install ${missing[*]} with apt-get (requires sudo)?"; then
     need_sudo apt-get update -qq && need_sudo apt-get install -y -qq "${missing[@]}"
-  else echo "  continuing without: ${missing[*]} (bubblewrap is optional but recommended)"; fi
+  else echo "  continuing without: ${missing[*]}"; fi
+fi
+
+say "Checking the bubblewrap sandbox (agents and quality gates will not run without it)"
+bwrap_ok() { command -v bwrap >/dev/null && bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --unshare-all --die-with-parent --new-session true 2>/dev/null; }
+if bwrap_ok; then echo "  bubblewrap works"
+else
+  if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = 1 ] && [ -x /usr/bin/bwrap ]; then
+    echo "  AppArmor restricts unprivileged user namespaces (Ubuntu 24.04 default), which blocks bubblewrap."
+    echo "  Fix: allow user namespaces for /usr/bin/bwrap only, with this AppArmor profile:"
+    profile='abi <abi/4.0>,\ninclude <tunables/global>\nprofile bwrap /usr/bin/bwrap flags=(unconfined) {\n  userns,\n  include if exists <local/bwrap>\n}'
+    printf '%b\n' "$profile" | sed 's/^/      /'
+    if ask "Install /etc/apparmor.d/bwrap and reload AppArmor (requires sudo)?"; then
+      printf '%b\n' "$profile" | need_sudo tee /etc/apparmor.d/bwrap >/dev/null && need_sudo apparmor_parser -r /etc/apparmor.d/bwrap
+    fi
+  fi
+  if bwrap_ok; then echo "  bubblewrap works"
+  else echo "  WARNING: bubblewrap cannot create a sandbox here. The supervisor will refuse to run agents and gates"
+       echo "  (fail closed) until it works, or until you explicitly set security.sandbox and security.agentSandbox to \"none\"."
+  fi
 fi
 node_ok() { command -v node >/dev/null && node -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>22||(a===22&&b>=13)?0:1)'; }
 if ! node_ok; then
@@ -46,7 +65,13 @@ for p in claude codex; do
   if command -v "$p" >/dev/null; then echo "  $p: $($p --version 2>/dev/null | head -1)";
   else
     pkg=$([ "$p" = claude ] && echo @anthropic-ai/claude-code || echo @openai/codex)
-    if ask "Install $p CLI globally with npm ($pkg)?"; then npm install -g "$pkg"; else echo "  skipped $p"; fi
+    # Never fail the installer on a root-owned global prefix: use a user prefix (~/.local) when it is not writable.
+    prefix="$(npm config get prefix 2>/dev/null || echo /usr/local)"
+    if [ -w "$prefix/lib/node_modules" ] || { [ ! -e "$prefix/lib/node_modules" ] && [ -w "$prefix" ]; }; then where=(); label="globally ($prefix)"
+    else where=(--prefix "$HOME/.local"); label="for this user (~/.local; $prefix is not writable)"; fi
+    if ask "Install $p CLI $label with npm ($pkg)?"; then
+      npm install -g "${where[@]}" "$pkg" || echo "  could not install $p; install it manually and re-run \`orchestrator doctor\`"
+    else echo "  skipped $p"; fi
   fi
 done
 

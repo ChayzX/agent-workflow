@@ -351,7 +351,7 @@ async function setup(flags: Flags): Promise<number> {
   }
   const tok = (() => { try { return resolveGitHubToken(cfg); } catch (e) { return `ERR ${(e as Error).message}`; } })();
   if (tok && !tok.startsWith('ERR')) ok('GitHub token found (env, secrets/github-token, or gh CLI)');
-  else warn(`GitHub token not found${tok ? ` (${tok})` : ''}. For GitHub mode create a token (classic PAT with "repo" and "project" scopes, or fine-grained with Issues/PRs/Contents RW for org repos) and save it:\n      install -m 600 /dev/null ${join(paths(cfg).secrets, 'github-token')} && $EDITOR ${join(paths(cfg).secrets, 'github-token')}`);
+  else warn(`GitHub token not found${tok ? ` (${tok})` : ''}. For GitHub mode create a token (classic PAT with "repo", "project" and "workflow" scopes, or fine-grained with Issues/PRs/Contents RW for org repos) and save it:\n      install -m 600 /dev/null ${join(paths(cfg).secrets, 'github-token')} && $EDITOR ${join(paths(cfg).secrets, 'github-token')}`);
   if (!findBwrap()) warn(sandboxAdvice(cfg)); else ok('bubblewrap sandbox works (with /proc, /tmp and all namespaces, as agents and gates use it)');
   if (token) out(`\nDashboard token (store it in your password manager):\n  ${revealToken(cfg, token)}\nDashboard: http://${cfg.dashboard.host}:${cfg.dashboard.port}/`);
   if (flags.service) installUserService(cfg);

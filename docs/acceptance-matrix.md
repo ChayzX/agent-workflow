@@ -17,7 +17,7 @@ whole duration. The redacted timeline is in `docs/evidence/wordfreq-live/events.
 | Requirement | Evidence | Status |
 |---|---|---|
 | Installs in a clean Linux environment | Self-package ZIP extracted to an empty directory with a scrubbed environment (`env -i`). The CLI runs with no `npm install`; `setup`, `doctor`, then `npm ci && npm test` (28/28 at the time). | ✅ live (clean directory; no fresh VM was available, see limitations) |
-| Guided configuration initializes a working service | `orchestrator setup` writes config (0600) and the DB, detects both CLIs, checks auth, and generates the dashboard token. `run` starts the supervisor and dashboard. The systemd units are in `deploy/systemd` (not exercised: no systemd in the container). | ✅ live / ⏳ systemd |
+| Guided configuration initializes a working service | `orchestrator setup` writes config (0600) and the DB, detects both CLIs, checks auth, and generates the dashboard token. `run` starts the supervisor and dashboard. **Operator run (Ubuntu 24.04 VM, 2026-11-28):** the user unit installed, restarted after `kill -9` with `supervisor.recovered`, and started at boot with linger. The system unit scored 3.8 OK in `systemd-analyze security`. It also showed that bubblewrap failed under both units (`PrivateTmp` in the user unit; `ProtectKernelTunables`/`ProtectKernelLogs` in the system unit), while the supervisor silently continued unconfined. Fixed afterwards: the units no longer set those options, the self-check matches real sandbox flags, and the sandbox fails closed. **The fix has not been re-run on the VM.** | ✅ live (service lifecycle); ⚠️ sandbox-under-systemd fix not re-verified |
 | A project starts from one goal | `orchestrator start --goal examples/goals/wordfreq-cli.md --repo new` → plan with 13 requirements and 9 work items → completed with verified release 0.1.0 | ✅ live |
 | Dashboard and CLI reflect actual state | `status`, `logs` and `release` output, and `/api/overview` and `/api/projects/:id` read the DB only (`test/web.test.ts`, and the live dashboard on :7420 during the run) | ✅ live |
 
@@ -39,11 +39,11 @@ whole duration. The redacted timeline is in `docs/evidence/wordfreq-live/events.
 ## D. GitHub and development
 | Requirement | Evidence | Status |
 |---|---|---|
-| Issues, dependencies, project statuses created and managed | `test/github.test.ts` against a fake GitHub: labels, milestones, requirement issues, sub-issues, `blocked_by` dependencies, Projects v2 fields, re-sync and crash-replay idempotency, external reconciliation. The live API was unavailable here (the repo-scoped proxy token is rejected by REST). | ✅ sim; ⏳ live (`docs/live-acceptance.md` §2) |
+| Issues, dependencies, project statuses created and managed | `test/github.test.ts` against a fake GitHub: labels, milestones, requirement issues, sub-issues, `blocked_by` dependencies, Projects v2 fields, re-sync and crash-replay idempotency, external reconciliation. **Operator run on `ChayzX/orch-acceptance`:** labels, milestones, requirement and work-item issues, `blocked_by`, and the Projects v2 status field were created and moved. A `kill -9` during issue creation produced no duplicates. Closing an issue as not planned cancelled its item, audited. Found and since fixed: git pushes had no credentials; a merged item whose issue was still open was re-integrated (a 4,892-push loop); reopening a cancelled item was ignored. **The fixes have not been re-run live.** | ✅ sim; ✅ live (sync, idempotency); ⚠️ reconcile fixes not re-verified |
 | Parallel implementation without overwriting work | Live: 15 work items in per-item worktrees, 2 agents at a time, 56 merge-gate runs, conflict path exercised (README conflict remediated) | ✅ live |
 | Providers review each other's code | Live run 2: Codex reviewed Claude's work (W-001, W-002, D-001, D-003, D-005, D-006: reviews, security reviews, verify-fix), and Claude reviewed Codex's (W-003, D-002, D-004). Codex's `request_changes` drove real remediation rounds. When Codex was exhausted, the fallback was recorded as "same provider as excluded (cross-provider unavailable)". | ✅ live; ✅ sim |
 | Deliberate defect detected and remediated | Sim: W-001 `add` subtracts, real `node --test` fails, remediation, pass. Sim: missing negative test → medium finding → fix → `verify_fix` by the reviewer. Live: audits created D-001…D-006, all remediated or handled. | ✅ sim + ✅ live |
-| Independent verification and real CI prevent premature merge | Exact-commit invariant (gated = reviewed = merged). PR merge uses the `sha` precondition. CI `failure` → remediation. Required human review → approval, never impersonated (`github.test.ts`). | ✅ sim; ⏳ live CI |
+| Independent verification and real CI prevent premature merge | Exact-commit invariant (gated = reviewed = merged). PR merge uses the `sha` precondition. CI `failure` → remediation. Required human review → approval, never impersonated (`github.test.ts`). **Live:** PR #21 got a 405 from branch protection, raised `human_review_required`, was reviewed by a second account, and merged with the exact reviewed head SHA; post-merge gates passed. A red-CI PR was not observed. | ✅ sim; ✅ live (human review, exact SHA); ⏳ red CI |
 
 ## E. Autonomous recovery
 | Requirement | Evidence | Status |
@@ -79,10 +79,15 @@ An independent reviewer agent ran several rounds:
   orchestrator secrets or rewrite `.git`, and could still write its worktree.
 - **Round 3:** in progress.
 
+## Operator verification (2026-11-28, `docs/evidence/operator-verification/REPORT.md`)
+- **HawkScan DAST: passed.** Two authenticated scans of the dashboard, one spidered and one seeded with a HAR of 13 API
+  routes, found 0 high, 0 medium and 0 low findings.
+- **Fresh-VM install: failed.** The npm global prefix was root-owned, and the CLIs symlinked into a hidden home did not
+  run. Both are fixed in the installer and sandbox. AppArmor guidance was added for Ubuntu 24.04. Not re-run.
+- **systemd:** the service lifecycle works. The sandbox under both units failed and is fixed (see above). Not re-run.
+- **GitHub mode:** partially verified live. The defects it found are fixed. Not re-run.
+
 ## Not yet verified
-- Live GitHub mode, needing a classic PAT; see the procedure.
-- Live Codex task execution and cross-provider Q&A, debate and review: scheduled after the 07:08 UTC Codex reset.
-- systemd on a real host.
-- HawkScan DAST (CLI install not permitted here).
-- A fresh-VM install.
-- Live OCI deployment (prepared only).
+- A re-run of the operator procedure on the fixed build: install, units, and GitHub mode including a red-CI PR and a
+  published release (#46).
+- Live OCI deployment. It is prepared only; there was no OKE context.

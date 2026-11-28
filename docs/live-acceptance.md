@@ -27,7 +27,7 @@ Expected evidence:
 - Completion-audit tasks ran on both providers, and the release ZIP is verified.
 
 ## 2. GitHub mode (D)
-1. Create an empty private test repository `you/orch-acceptance` and a classic PAT with `repo` and `project` scopes.
+1. Create an empty private test repository `you/orch-acceptance` and a classic PAT with `repo`, `project` and `workflow` scopes (GitHub refuses pushes that touch `.github/workflows/` without `workflow`).
    Save the PAT to `$ORCH_HOME/secrets/github-token` (mode 600).
 2. Optionally add a CI workflow that runs `npm test`, and require it plus one approving review in branch protection.
 3. `orchestrator start --goal examples/goals/wordfreq-cli.md --repo you/orch-acceptance --mode github`

@@ -84,7 +84,7 @@ Requirements: Node ≥ 22.13, git, tar and bubblewrap (`bwrap`). If any are miss
 ## C. GitHub mode, live — issues #29, #30, #31 and #32
 1. Ask me to:
    - create an empty **private** repository `ChayzX/orch-acceptance`;
-   - create a classic PAT with the `repo` and `project` scopes;
+   - create a classic PAT with the `repo`, `project` and `workflow` scopes (`workflow` is needed whenever a pushed branch touches `.github/workflows/`);
    - put the PAT in `~/.orchestrator/secrets/github-token` (mode 600). I will place the file myself. Do not ask me to
      paste it.
 2. Add a CI workflow to `orch-acceptance` that runs `npm test` on pull requests. Ask me to enable branch protection on
