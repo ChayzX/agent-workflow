@@ -565,3 +565,49 @@ test('PR #61 review #9: runGates passes the shared repository to the gate sandbo
     assert.equal(withGit.passed, true, 'with gitDir git works read-only');
   } finally { h.cleanup(); }
 });
+
+test('operator verification #29: GitHub-mode git transport carries the supervisor token (env-scoped, never on disk)', async (t) => {
+  const tokDir = mkdtempSync(join(tmpdir(), 'orch-tok-'));
+  const tokFile = join(tokDir, 'github-token');
+  writeFileSync(tokFile, 'test-token-abc\n', { mode: 0o600 });
+  const saved = { a: process.env.GITHUB_TOKEN, b: process.env.ORCH_GITHUB_TOKEN };
+  delete process.env.GITHUB_TOKEN; delete process.env.ORCH_GITHUB_TOKEN; // isolate from the host environment
+  t.after(() => { if (saved.a !== undefined) process.env.GITHUB_TOKEN = saved.a; if (saved.b !== undefined) process.env.ORCH_GITHUB_TOKEN = saved.b; });
+  const h = makeHarness(demoBehaviour(), (c) => { c.github.tokenFile = tokFile; });
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    const ws = h.sup.workflow.ws({ ...p0, repo_mode: 'github' });
+    const env = (ws as any).auth() as Record<string, string>;
+    assert.equal(env.GIT_CONFIG_KEY_0, 'http.https://github.com/.extraheader');
+    assert.equal(env.GIT_CONFIG_VALUE_0, `AUTHORIZATION: basic ${Buffer.from('x-access-token:test-token-abc').toString('base64')}`);
+    assert.deepEqual((h.sup.workflow.ws(p0) as any).auth(), {}, 'local mode gets no credentials');
+  } finally { h.cleanup(); rmSync(tokDir, { recursive: true, force: true }); }
+});
+
+test('operator verification #31: rejected pushes never retry in a tight loop (scope/auth block at once; others back off, then block)', async () => {
+  const h = makeHarness(demoBehaviour());
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    await drive(h, (x) => done(x.status), p0.id, { maxTicks: 900 });
+    const wf = h.sup.workflow; const proj = wf.store.project(p0.id)!;
+    const reset = (key: string) => { h.ctx.db.run("UPDATE work_items SET status='merge_ready' WHERE project_id=? AND key=?", p0.id, key); return wf.store.workItemByKey(p0.id, key)!; };
+    let w = reset('W-001');
+    (wf as any).onPushFailure(proj, w, "! [remote rejected] orch/w-001 (refusing to allow a Personal Access Token to create or update workflow `.github/workflows/ci.yml` without `workflow` scope)");
+    w = wf.store.workItemByKey(p0.id, 'W-001')!;
+    assert.equal(w.status, 'blocked'); assert.match(w.status_reason ?? '', /workflow` scope/);
+    w = reset('W-002');
+    (wf as any).onPushFailure(proj, w, "fatal: could not read Username for 'https://github.com': terminal prompts disabled");
+    assert.equal(wf.store.workItemByKey(p0.id, 'W-002')!.status, 'blocked', 'missing credentials block at once');
+    w = reset('W-003');
+    const delays: number[] = [];
+    for (let i = 0; i < 4; i++) {
+      (wf as any).onPushFailure(proj, w, 'error: RPC failed; curl 56 connection reset');
+      delays.push(((wf as any).pushRetryAt.get(w.id) as number) - h.clock.now());
+      h.clock.advance(1);
+    }
+    assert.deepEqual(delays, [30_000, 60_000, 120_000, 240_000], 'exponential backoff');
+    assert.equal(wf.store.workItemByKey(p0.id, 'W-003')!.status, 'merge_ready');
+    (wf as any).onPushFailure(proj, w, 'error: RPC failed; curl 56 connection reset');
+    assert.equal(wf.store.workItemByKey(p0.id, 'W-003')!.status, 'blocked', 'blocked after 5 consecutive failures');
+  } finally { h.cleanup(); }
+});

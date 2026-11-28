@@ -33,7 +33,9 @@ export class Workflow {
   private jobs = new Map<string, Promise<void>>();
   private lastSync = new Map<string, number>();
   private lastRemoteCheck = new Map<string, number>();
-  private tokenProvider: () => string | null = () => null;
+  private pushRetryAt = new Map<string, number>(); // work item id → earliest next push attempt (backoff after failures)
+  // Git transport credentials for GitHub mode: the same token the API client uses (env-scoped per git call).
+  private tokenProvider: () => string | null = () => this.ctx.githubToken?.() ?? null;
 
   constructor(private ctx: Ctx, private wake: () => void) {
     this.store = new Store(ctx.db, ctx.clock);
@@ -390,6 +392,26 @@ export class Workflow {
   }
 
   // ---------------------------------------------------------------- merge
+  /**
+   * A rejected push is never retried in a tight loop. Credential/permission rejections block the item at once with the
+   * exact operator action; other failures back off exponentially (30 s → 30 min) and block after 5 consecutive failures.
+   */
+  private onPushFailure(p: ProjectRow, w: WorkItemRow, message: string): void {
+    this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'push_failed', summary: message.slice(0, 1000) });
+    this.ctx.events.emit('git.push_failed', `${w.key}: push failed: ${message.slice(0, 300)}`, { projectId: p.id, level: 'warn' });
+    if (/without `?workflow`? scope/i.test(message)) {
+      this.block(p, w, `GitHub refused the push because it changes .github/workflows and the token lacks the \`workflow\` scope. Add the \`workflow\` scope to the PAT (or drop the workflow change), then run \`orchestrator unblock ${w.key} --note "token has workflow scope"\``);
+      return;
+    }
+    if (/could not read Username|Authentication failed|Invalid username or token|returned error: 40[13]|Permission to .* denied/i.test(message)) {
+      this.block(p, w, `GitHub rejected the push credentials (${message.slice(0, 160)}). Check the token in ORCH_HOME/secrets/github-token (classic PAT: repo, project, workflow scopes), then run \`orchestrator unblock ${w.key} --note "token fixed"\``);
+      return;
+    }
+    const n = this.epoch(w, 'push_failed', true);
+    if (n >= 5) { this.block(p, w, `push failed ${n} times since the last operator unblock: ${message.slice(0, 200)}`); return; }
+    this.pushRetryAt.set(w.id, this.ctx.clock.now() + Math.min(30 * 60_000, 30_000 * 2 ** (n - 1)));
+  }
+
   private async merge(p: ProjectRow, w0: WorkItemRow): Promise<void> {
     const w = this.store.workItem(w0.id)!;
     if (w.status !== 'merge_ready') return;
@@ -429,7 +451,14 @@ export class Workflow {
     if (p.repo_mode === 'github') {
       const gh = this.ctx.github(p.id);
       if (!gh) { this.block(p, w, 'GitHub mode but GitHub client unavailable (token missing?)'); return; }
-      await ws.push(w.branch!, true);
+      if ((this.pushRetryAt.get(w.id) ?? 0) > this.ctx.clock.now()) return; // backing off after a failed push
+      try {
+        await ws.push(w.branch!, true);
+        this.pushRetryAt.delete(w.id);
+      } catch (e) {
+        this.onPushFailure(p, w, (e as Error).message);
+        return;
+      }
       const pr = await gh.ensurePullRequest(w, p.default_branch);
       this.store.transition(w.id, ['merge_ready'], 'merging', { pr_number: pr.number }, `PR #${pr.number} awaiting checks`);
       this.ctx.events.audit('supervisor', 'git.push', { projectId: p.id, target: w.branch, detail: { pr: pr.number, sha: w.head_commit } });
@@ -576,16 +605,23 @@ export class Workflow {
     this.job(`ghsync:${p.id}`, p.id, async () => {
       for (const c of await gh.reconcileExternal(this.store)) {
         const w = this.store.workItemByKey(p.id, c.key)!;
-        if (c.change === 'closed_not_planned') {
+        const integrating = ['merge_ready', 'merging', 'merged', 'done'].includes(w.status);
+        if (c.change === 'closed_not_planned' && !integrating && w.status !== 'cancelled') {
           // An operator descoping work on GitHub is an authorized requirement change: honour and record it.
           this.store.transition(w.id, [w.status], 'cancelled', {}, 'closed as not planned on GitHub by operator');
           this.ctx.queue.cancelForWorkItem(w.id, 'cancelled on GitHub');
           this.ctx.events.audit('github', 'workitem.descoped', { projectId: p.id, target: w.key });
-        } else if (c.change === 'reopened') {
-          this.store.transition(w.id, [w.status], 'ready', { remediation_rounds: 0 }, 'reopened on GitHub');
+        } else if (c.change === 'reopened' && ['cancelled', 'merged', 'done'].includes(w.status)) {
+          // A human reopened an issue the orchestrator had closed: the work is wanted (again). Dependencies re-resolve.
+          this.store.transition(w.id, [w.status], 'backlog', { remediation_rounds: 0 }, `reopened on GitHub (was ${w.status})`);
+          this.ctx.events.audit('github', 'workitem.reopened', { projectId: p.id, target: w.key, detail: { from: w.status } });
+          this.ctx.events.emit('workitem.reopened', `${w.key} reopened on GitHub (was ${w.status})`, { projectId: p.id, level: 'warn' });
         } else {
-          // Closed as completed externally without verification: re-open on GitHub on next sync (local state is authoritative for execution).
+          // Anything else (closed as completed without verification, descoping work already being integrated, a reopen of
+          // an item that is still in progress): local state is authoritative; the next sync restores the issue state.
           this.store.patchWorkItem(w.id, {});
+          this.ctx.events.audit('github', 'workitem.external_change_reverted', { projectId: p.id, target: w.key, detail: { change: c.change, status: w.status } });
+          this.ctx.events.emit('github.warn', `${w.key}: ${c.change.replace(/_/g, ' ')} on GitHub ignored while ${w.status}; issue state will be restored`, { projectId: p.id, level: 'warn' });
         }
       }
       await gh.syncAll(this.store);
