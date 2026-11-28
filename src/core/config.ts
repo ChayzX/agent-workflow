@@ -45,6 +45,7 @@ export interface Config {
   };
   security: {
     allowedRepos: string[]; sandbox: 'auto' | 'bwrap' | 'none'; agentSandbox?: 'auto' | 'bwrap' | 'none'; agentSandboxRelaxFor?: string[]; gateNetwork: boolean;
+    devVmGateCommand?: string; // absolute path to the trusted Chasebot devvm executable
     approvalRequiredFor: string[]; protectedPathGlobs: string[];
   };
   dashboard: { host: string; port: number; tokenHash: string | null; sessionHours: number; trustProxy?: boolean };

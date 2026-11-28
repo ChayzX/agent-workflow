@@ -1,0 +1,9 @@
+[Unit]
+Description=Prune expired local development VM keys every five minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

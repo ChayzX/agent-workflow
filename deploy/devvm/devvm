@@ -1,0 +1,277 @@
+#!/usr/bin/env python3
+"""Chasebot command-line interface for Windows-hosted Debian development VMs."""
+
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import signal
+import socket
+import subprocess
+import sys
+import time
+import uuid
+
+
+HOME = Path(os.environ.get("DEVVM_HOME", Path.home() / ".local" / "share" / "devvm")).expanduser().resolve()
+LEASES = HOME / "leases"
+WINDOWS = "192.168.40.136"
+WINDOWS_PORT = 2224
+WINDOWS_TARGET = f"aidevvm@{WINDOWS}"
+MAC = bytes.fromhex("00410e25e015")
+BROADCAST = "192.168.40.255"
+LEASE_ID = re.compile(r"[0-9a-f]{32}")
+KEY = re.compile(r"ssh-ed25519 [A-Za-z0-9+/=]{68}")
+
+
+def identifier(value):
+    if not LEASE_ID.fullmatch(value):
+        raise argparse.ArgumentTypeError("Expected a 32-character lowercase hexadecimal lease ID")
+    return value
+
+
+def wake_packet():
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+        udp.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        udp.sendto(b"\xff" * 6 + MAC * 16, (BROADCAST, 9))
+
+
+def wait_host():
+    end, next_wake = time.monotonic() + 180, 0
+    while time.monotonic() < end:
+        try:
+            with socket.create_connection((WINDOWS, WINDOWS_PORT), timeout=2):
+                return
+        except OSError:
+            now = time.monotonic()
+            if now >= next_wake:
+                wake_packet()
+                print("Wake-on-LAN sent to the gaming PC.", file=sys.stderr, flush=True)
+                next_wake = now + 15
+            time.sleep(2)
+    raise TimeoutError("Gaming PC SSH listener did not become reachable within 180 seconds")
+
+
+def ssh_options(private, known):
+    return ["ssh", "-F", "/dev/null", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+            "-o", "StrictHostKeyChecking=yes", "-o", "GlobalKnownHostsFile=/dev/null",
+            "-o", f"UserKnownHostsFile={known}", "-o", "HostKeyAlgorithms=ssh-ed25519",
+            "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=10",
+            "-o", "ServerAliveCountMax=3", "-i", str(private)]
+
+
+def windows_ssh():
+    return ssh_options(HOME / "windows_ed25519", HOME / "windows_known_hosts") + ["-p", str(WINDOWS_PORT)]
+
+
+def request(operation, wake=False, **parameters):
+    if wake:
+        wait_host()
+    completed = subprocess.run(windows_ssh() + ["-T", WINDOWS_TARGET, "devvm"], text=True,
+                               input=json.dumps(dict(op=operation, **parameters)) + "\n",
+                               capture_output=True, timeout=490)
+    if completed.returncode:
+        raise RuntimeError(completed.stderr.strip() or f"Windows SSH exited {completed.returncode}")
+    response = json.loads(completed.stdout)
+    if not response["ok"]:
+        raise RuntimeError(response["error"])
+    return response["value"]
+
+
+def save_json(path, payload):
+    temporary = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+    temporary.write_text(json.dumps(payload) + "\n")
+    temporary.replace(path)
+
+
+def guest_ssh(lease, key=None, quiet=False):
+    folder = LEASES / lease["id"]
+    if not KEY.fullmatch(lease.get("host_key") or "") or not 22400 <= lease["port"] <= 22407:
+        raise RuntimeError("Windows returned invalid guest SSH metadata")
+    name = "adev-" + lease["id"]
+    proxy = shlex.join(windows_ssh() + ["-W", f'127.0.0.1:{lease["port"]}', WINDOWS_TARGET])
+    options = ssh_options(key or folder / "identity", folder / "known_hosts") + [
+        "-o", f"HostKeyAlias={name}", "-o", f"ProxyCommand={proxy}",
+    ]
+    if quiet:
+        options += ["-T"]
+    return options
+
+
+def get_lease(value):
+    folder = LEASES / value
+    if not (folder / "lease.json").is_file():
+        raise RuntimeError("This lease has no local receipt; use status or destroy to inspect it")
+    lease = json.loads((folder / "lease.json").read_text())
+    if lease["expires_at"] <= time.time():
+        raise RuntimeError("Lease has expired")
+    return lease
+
+
+def provision(value, cpus, ram_mib, disk_gib, ttl_minutes, public_key=None):
+    folder = LEASES / value
+    folder.mkdir(mode=0o700, exist_ok=True)
+    with (folder / "lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        private = folder / "identity"
+        if public_key:
+            public = Path(public_key).read_text().strip()
+        else:
+            if not private.exists():
+                subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(private)],
+                               stdin=subprocess.DEVNULL, check=True, timeout=15)
+            public = private.with_suffix(".pub").read_text().strip()
+        save_json(folder / "request.json", {"ttl_minutes": ttl_minutes})
+        lease = request("provision", wake=True, id=value, cpus=cpus, ram_mib=ram_mib,
+                        disk_gib=disk_gib, ttl_minutes=ttl_minutes, public_key=public)
+        if not KEY.fullmatch(lease.get("host_key") or ""):
+            raise RuntimeError("Windows returned an invalid guest host key")
+        (folder / "known_hosts").write_text(f'adev-{value} {lease["host_key"]}\n')
+        save_json(folder / "lease.json", lease)
+        if not public_key:
+            # Without AMD-V/VT-x VirtualBox runs on the Hyper-V API (NEM), where a
+            # first boot measured ~2.5 minutes; concurrent boots take longer.
+            deadline = min(time.time() + 420, lease["expires_at"])
+            while time.time() < deadline:
+                try:
+                    check = subprocess.run(guest_ssh(lease, quiet=True) + ["dev@localhost", "cloud-init status --wait"],
+                                           # Keep stdin free: `gate` streams the source archive through it.
+                                           stdin=subprocess.DEVNULL,
+                                           capture_output=True, text=True, timeout=max(1, deadline - time.time()))
+                except subprocess.TimeoutExpired:
+                    continue
+                if not check.returncode:
+                    break
+                if "HOST IDENTIFICATION HAS CHANGED" in check.stderr:
+                    raise RuntimeError("Guest SSH host key does not match its lease")
+                time.sleep(2)
+            else:
+                raise RuntimeError("Guest did not finish cloud-init before the SSH deadline")
+        return lease
+
+
+def destroy(value, wake=True):
+    response = request("destroy", wake=wake, id=value)
+    clear_local(value)
+    return response
+
+
+def clear_local(value):
+    folder = LEASES / value
+    for name in ("identity", "identity.pub", "known_hosts", "request.json", "lease.json"):
+        (folder / name).unlink(missing_ok=True)
+
+
+def prune():
+    for folder in LEASES.iterdir():
+        if not folder.is_dir() or not LEASE_ID.fullmatch(folder.name):
+            continue
+        with (folder / "lock").open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                continue
+            receipt = folder / "lease.json"
+            pending = folder / "request.json"
+            if receipt.exists():
+                expired = json.loads(receipt.read_text())["expires_at"] <= time.time()
+            elif pending.exists():
+                expired = pending.stat().st_mtime + 900 + 60 * json.loads(pending.read_text())["ttl_minutes"] <= time.time()
+            else:
+                expired = True
+            if expired:
+                clear_local(folder.name)
+
+
+def gate(command, cpus, ram_mib, disk_gib, ttl_minutes, network):
+    """Read a trusted orchestrator's git archive on stdin and execute one command in a fresh VM."""
+    value = uuid.uuid4().hex
+    try:
+        lease = provision(value, cpus, ram_mib, disk_gib, ttl_minutes)
+        namespace = "" if network else "unshare --net --pid --fork --mount-proc "
+        script = (
+            "set -eu; directory=$(mktemp -d /tmp/agent-gate.XXXXXXXX); "
+            'tar --no-same-owner --no-same-permissions -xf - -C "$directory"; '
+            'sudo chown -hR devgate:devgate "$directory"; '
+            f"exec sudo {namespace}runuser -u devgate -- env -C \"$directory\" CI=true /bin/bash -c " + shlex.quote(command)
+        )
+        return subprocess.run(guest_ssh(lease, quiet=True) + ["dev@localhost", script], check=False).returncode
+    finally:
+        try:
+            # A running or partially created lease remains subject to the Windows reaper.
+            destroy(value, wake=False)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            print(f"Lease {value} cleanup will be retried by the host reaper: {exc}", file=sys.stderr)
+
+
+def size_options(parser, ttl=60):
+    parser.add_argument("--cpus", type=int, choices=range(1, 5), default=2)
+    parser.add_argument("--ram-mib", type=int, default=2048)
+    parser.add_argument("--disk-gib", type=int, choices=range(8, 25), default=12)
+    parser.add_argument("--ttl-minutes", type=int, default=ttl)
+
+
+def main():
+    os.umask(0o077)
+    LEASES.mkdir(mode=0o700, parents=True, exist_ok=True)
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="operation", required=True)
+    allocation = commands.add_parser("provision")
+    allocation.add_argument("--id", type=identifier)
+    allocation.add_argument("--public-key", type=Path)
+    size_options(allocation)
+    remote_gate = commands.add_parser("gate")
+    remote_gate.add_argument("--network", action="store_true")
+    size_options(remote_gate, ttl=30)
+    remote_gate.add_argument("command")
+    for operation in ("status", "destroy"):
+        commands.add_parser(operation).add_argument("id", type=identifier)
+    for operation in ("list", "wake", "pause", "resume", "prune"):
+        commands.add_parser(operation)
+    ssh = commands.add_parser("ssh")
+    ssh.add_argument("--identity", type=Path)
+    ssh.add_argument("id", type=identifier)
+    ssh.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    operation = args.operation
+    if operation == "gate":
+        return gate(args.command, args.cpus, args.ram_mib, args.disk_gib, args.ttl_minutes, args.network)
+    if operation == "ssh":
+        command = args.command[1:] if args.command[:1] == ["--"] else args.command
+        remote = command if len(command) <= 1 else [shlex.join(command)]
+        return subprocess.run(guest_ssh(get_lease(args.id), args.identity) + ["dev@localhost", *remote]).returncode
+    if operation == "provision":
+        value = args.id or uuid.uuid4().hex
+        print(f"Lease {value}", file=sys.stderr, flush=True)
+        output = provision(value, args.cpus, args.ram_mib, args.disk_gib, args.ttl_minutes, args.public_key)
+    elif operation == "destroy":
+        output = destroy(args.id)
+    elif operation == "wake":
+        output = request("ping", wake=True)
+    elif operation == "status":
+        output = request("status", id=args.id)
+    elif operation == "prune":
+        prune()
+        return 0
+    else:
+        output = request(operation)
+    print(json.dumps(output, sort_keys=True))
+    return 0
+
+
+def interrupted(_signal, _frame):
+    raise KeyboardInterrupt
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, interrupted)
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        print(f"devvm: {error}", file=sys.stderr)
+        sys.exit(1)

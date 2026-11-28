@@ -9,6 +9,7 @@ import type { QualityGate } from '../core/types.js';
 import { gateEnv, runSandboxed } from '../security/sandbox.js';
 import { scanTree } from '../security/secrets.js';
 import type { Ctx } from './ctx.js';
+import { runDevVmGate } from './devvm-gate.js';
 
 export interface GateResult { name: string; required: boolean; status: 'pass' | 'fail' | 'error'; exitCode: number | null; durationMs: number; excerpt: string; logPath: string; sandbox: string }
 export interface GateSummary { passed: boolean; results: GateResult[]; commit: string }
@@ -29,15 +30,22 @@ export async function runGates(ctx: Ctx, opts: { projectId: string; workItemId: 
   mkdirSync(logDir, { recursive: true, mode: 0o700 });
   const home = join(ctx.paths.home, 'gate-home', opts.projectId);
   mkdirSync(home, { recursive: true, mode: 0o700 });
+  const devVm = ctx.cfg.security.devVmGateCommand;
+  const blockExport = devVm && scanTree(opts.cwd).length > 0;
 
   for (const g of opts.gates) {
     const started = ctx.clock.now();
-    const r = await runSandboxed(
+    const timeoutMs = (g.timeout_sec ?? 900) * 1000;
+    const r = blockExport ? {
+      spawnError: 'Built-in secret scan found credentials. Source export was blocked.',
+      stdout: '', stderr: '', timedOut: false, exitCode: null, durationMs: 0, sandbox: 'debian-devvm',
+    } : devVm ? await runDevVmGate(devVm, opts.cwd, opts.gitDir, opts.commit, g.command, ctx.cfg.security.gateNetwork, timeoutMs)
+      : await runSandboxed(
       ctx.cfg,
       { cwd: opts.cwd, writable: [opts.cwd, home], readOnly: opts.gitDir ? [opts.gitDir] : [], hide: [ctx.paths.home], network: ctx.cfg.security.gateNetwork, readOnlyLast: [join(opts.cwd, '.git')] },
       g.command,
       gateEnv(ctx.cfg, home),
-      (g.timeout_sec ?? 900) * 1000,
+      timeoutMs,
     );
     const out = `$ ${g.command}\n${r.stdout}\n${r.stderr}${r.timedOut ? '\n[timed out]' : ''}${r.spawnError ? `\n[spawn error] ${r.spawnError}` : ''}`;
     const logPath = join(logDir, `${g.name.replace(/[^a-z0-9_.-]/gi, '_')}.log`);
