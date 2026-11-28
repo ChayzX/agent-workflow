@@ -75,6 +75,7 @@ switch (op) {
     process.exit(runIn(join(leaseDir(l.id), 'root'), cmd.join(' ') || 'true'));
   }
   case 'gate': {
+    if (rest.includes('--help')) { process.stdout.write('usage: devvm gate [--status-file STATUS_FILE] [--network] ... -- command\n'); process.exit(0); }
     admission();
     const sep = rest.indexOf('--');
     const command = sep >= 0 ? rest.slice(sep + 1).join(' ') : rest.at(-1);

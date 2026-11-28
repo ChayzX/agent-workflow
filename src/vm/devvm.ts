@@ -1,8 +1,8 @@
 // Client for the trusted `devvm` executable (deploy/devvm/) that runs work in throwaway Debian VMs on the
 // gaming PC. The control plane (Chasebot) only ships sources in and results out; commands never run here.
-import { accessSync, constants, createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { accessSync, constants, createReadStream, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, isAbsolute, join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import type { Readable } from 'node:stream';
 import { execFileSync } from 'node:child_process';
 import { git } from '../git/git.js';
@@ -22,15 +22,40 @@ export class VmUnavailableError extends Error {
   constructor(message: string) { super(message); this.name = 'VmUnavailableError'; }
 }
 
-/** Every directory in `dir`'s chain must be owned by root or us and not writable by others (root-owned sticky is fine). */
-function checkDirChain(dir: string, uid: number): string | null {
-  for (let p = dir; ; p = dirname(p)) {
-    let s;
-    try { s = statSync(p); } catch { return `${p} does not exist`; }
-    if (s.uid !== 0 && s.uid !== uid) return `${p} is owned by uid ${s.uid}, not root or the service user`;
-    if ((s.mode & 0o022) && !((s.mode & 0o1000) && s.uid === 0)) return `${p} is writable by group or others`;
-    if (p === '/' || dirname(p) === p) return null;
+function dirProblem(p: string, uid: number): string | null {
+  const s = statSync(p);
+  if (!s.isDirectory()) return `${p} is not a directory`;
+  if (s.uid !== 0 && s.uid !== uid) return `${p} is owned by uid ${s.uid}, not root or the service user`;
+  if ((s.mode & 0o022) && !((s.mode & 0o1000) && s.uid === 0)) return `${p} is writable by group or others`;
+  return null;
+}
+
+/**
+ * Walk `path` one component at a time, following every symlink met on the way. Each directory traversed — in
+ * particular every directory that holds a symlink — must be owned by root or us and not writable by others
+ * (a root-owned sticky directory is fine), so nobody else can swap any link or file on the way.
+ */
+function pathProblem(path: string, uid: number, depth = 0): string | null {
+  if (depth > 40) return `${path}: too many symbolic links`;
+  const parts = path.split('/').filter(Boolean);
+  let cur = '/';
+  const top = dirProblem('/', uid);
+  if (top) return top;
+  for (let i = 0; i < parts.length; i++) {
+    const next = join(cur, parts[i]!);
+    let st;
+    try { st = lstatSync(next); } catch { return `${next} does not exist`; }
+    if (st.isSymbolicLink()) {
+      const target = resolve(cur, readlinkSync(next));
+      return pathProblem(join(target, ...parts.slice(i + 1)), uid, depth + 1);
+    }
+    if (i < parts.length - 1) {
+      const d = dirProblem(next, uid);
+      if (d) return d;
+      cur = next;
+    }
   }
+  return null;
 }
 
 /**
@@ -50,7 +75,7 @@ export function checkDevVmExecutable(path: string | null | undefined): string | 
   if (st.uid !== 0 && st.uid !== uid) return `${real} is owned by uid ${st.uid}, not root or the service user`;
   if (st.mode & 0o022) return `${real} is writable by group or others`;
   try { accessSync(real, constants.X_OK); } catch { return `vm.command ${real} is not executable`; }
-  return checkDirChain(dirname(path), uid) ?? checkDirChain(dirname(real), uid);
+  return pathProblem(path, uid);
 }
 
 export function resolveDevVm(path: string): string {
@@ -122,10 +147,19 @@ export async function runVmCommand(executable: string, prepared: PreparedSource,
     args.push('--', command);
     const r = await devvm(executable, args, { stdin: createReadStream(prepared.archive), timeoutMs: budgetMs });
     if (existsSync(statusFile)) {
-      const code = Number(readFileSync(statusFile, 'utf8').trim());
-      if (Number.isInteger(code)) return { ...r, exitCode: code, unavailable: false, sandbox };
+      const status = readFileSync(statusFile, 'utf8').trim();
+      const setup = /^setup:(\d+)$/.exec(status);
+      // The guest could not unpack or prepare the source (e.g. the disk is too small): a gate error, not an outage.
+      if (setup) return { ...r, exitCode: null, unavailable: false, sandbox, spawnError: `the VM could not prepare the source for this command (setup step exited ${setup[1]}; is vm.gate.diskGib large enough?)` };
+      if (/^\d+$/.test(status)) return { ...r, exitCode: Number(status), unavailable: false, sandbox };
     }
     // No status: the command never ran to completion in a VM (outage), unless we timed out waiting for it.
     return { ...r, unavailable: !r.timedOut && !r.aborted, sandbox };
   } finally { rmSync(statusDir, { recursive: true, force: true }); }
+}
+
+/** The installed devvm must support the out-of-band status (an older copy would make every gate wait forever). */
+export async function devvmSupportsStatusFile(executable: string): Promise<boolean> {
+  const r = await devvm(executable, ['gate', '--help'], { timeoutMs: 20_000 });
+  return r.exitCode === 0 && r.stdout.includes('--status-file');
 }

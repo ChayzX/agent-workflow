@@ -336,3 +336,57 @@ test('review#65 F2: a package with credentials is never exported for release ver
     assert.equal(fake.calls().length, 0);
   } finally { prepared.dispose(); }
 });
+
+test('review#65 N2: a key inside a very long (minified) line is found by the export scan', async () => {
+  const { scanText } = await import('../src/security/secrets.js');
+  const line = 'xxxxxxxxxx'.repeat(500) + 'q'.repeat(60) + ';var k="AKIAABCDEFGHIJKLMNOP";' + 'q'.repeat(60) + 'example'.repeat(300); // markers far from the key do not hide it
+  assert.equal(scanText('a.min.js', line).length, 0, 'the default scan still skips long lines');
+  assert.equal(scanText('a.min.js', line, { longLines: true }).length, 1);
+  const fake = installFake();
+  const { dir, commit } = repoWith({ 'dist/app.min.js': line });
+  const h = makeHarness(noAgents, (c) => { c.security.gateBackend = 'devvm'; c.vm.command = fake.bin; });
+  try {
+    const s = await runGates(h.ctx, { projectId: 'p1', workItemId: null, scope: 'task', cwd: dir, commit, gates: [{ name: 't', command: 'true', required: true }] as never });
+    assert.equal(s.passed, false);
+    assert.equal(fake.gates().length, 0);
+  } finally { h.cleanup(); }
+});
+
+test('review#65 N3: a symlink chain through a writable directory is not trusted', () => {
+  const fake = installFake();
+  const root = tmp('orch-chain-');
+  const open = join(root, 'open'); mkdirSync(open); chmodSync(open, 0o777);
+  execFileSync('ln', ['-s', join(fake.bin, '..'), join(open, 'l1')]);   // swappable link inside a writable dir
+  const bin = join(root, 'bin'); execFileSync('ln', ['-s', join(open, 'l1'), bin]);
+  assert.match(checkDevVmExecutable(join(bin, 'devvm'))!, /writable by group or others/);
+  assert.equal(checkDevVmExecutable(fake.bin), null);
+});
+
+test('review#65 N1/N4: the status lives outside the gate user\'s reach; setup failures are gate errors; outdated devvm blocks', async () => {
+  const src = readFileSync(join(REPO, 'deploy', 'devvm', 'devvm'), 'utf8');
+  assert.match(src, /status_dir = f"\$HOME\/\.gate-status-\{value\}"/, 'status directory is in dev\'s home, not the shared /tmp');
+  assert.doesNotMatch(src, /\{directory\}\.rc/, 'no status file next to the untrusted working directory');
+  const fake = installFake();
+  const { dir, commit } = repoWith({ 'a.txt': 'a' });
+  const { prepareVmSource, runVmCommand } = await import('../src/vm/devvm.js');
+  // A fake devvm whose guest reports a setup failure.
+  const setupFail = join(fake.home, '..', 'devvm-setup');
+  writeFileSync(setupFail, `#!/bin/sh\nfor a; do case "$prev" in --status-file) echo setup:2 > "$a";; esac; prev=$a; done\ncat >/dev/null; exit 0\n`);
+  chmodSync(setupFail, 0o755);
+  const prepared = await prepareVmSource({ kind: 'git', cwd: dir, commit });
+  try {
+    const r = await runVmCommand(setupFail, prepared, 'true', false, 60_000);
+    assert.equal(r.unavailable, false);
+    assert.equal(r.exitCode, null);
+    assert.match(r.spawnError!, /could not prepare the source/);
+  } finally { prepared.dispose(); }
+  const old = join(fake.home, '..', 'devvm-old');
+  writeFileSync(old, '#!/bin/sh\ncase "$1" in reachable) echo \'{"reachable":true}\';; *) echo "usage: devvm gate" ;; esac\n');
+  chmodSync(old, 0o755);
+  const h = makeHarness(noAgents, (c) => { c.security.gateBackend = 'devvm'; c.vm.command = old; });
+  try {
+    await h.sup.start(); await h.sup.stop(10);
+    assert.ok(h.ctx.db.get("SELECT 1 FROM events WHERE type='security.vm_backend_unavailable' AND message LIKE '%outdated%'"));
+    await assert.rejects(runGates(h.ctx, { projectId: 'p1', workItemId: null, scope: 'task', cwd: dir, commit, gates: [{ name: 't', command: 'true', required: true }] as never }), /outdated/);
+  } finally { h.cleanup(); }
+});

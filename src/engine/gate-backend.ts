@@ -4,7 +4,7 @@
 // closed; gates never fall back to running on this host.
 import type { Config } from '../core/config.js';
 import type { Ctx } from './ctx.js';
-import { checkDevVmExecutable, devvm } from '../vm/devvm.js';
+import { checkDevVmExecutable, devvm, devvmSupportsStatusFile } from '../vm/devvm.js';
 
 export type GateBackendKind = 'local' | 'devvm';
 
@@ -47,6 +47,12 @@ export async function gateBackendSelfCheck(ctx: Ctx): Promise<void> {
     const why = `devvm cannot query the VM host: ${(r.stderr || r.spawnError || `exit ${r.exitCode}`).trim().slice(0, 300)}`;
     ctx.events.emit('security.vm_backend_unavailable', `${why}. Gates will wait until this is fixed (they never run on this host).`, { level: 'error' });
     ctx.events.audit('supervisor', 'security.vm_backend_unavailable', { detail: { reason: why } });
+    return;
+  }
+  if (!(await devvmSupportsStatusFile(ctx.cfg.vm.command!))) {
+    s.blocked = `the devvm at ${ctx.cfg.vm.command} is outdated (no gate --status-file): reinstall it from deploy/devvm/devvm. Gates will not run until then.`;
+    ctx.events.emit('security.vm_backend_unavailable', s.blocked, { level: 'error' });
+    ctx.events.audit('supervisor', 'security.vm_backend_unavailable', { detail: { reason: 'devvm lacks --status-file' } });
     return;
   }
   const where = awake ? 'host reachable' : 'host asleep or unreachable; gates will wake it on demand';

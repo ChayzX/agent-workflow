@@ -275,25 +275,31 @@ def gate(command, cpus, ram_mib, disk_gib, ttl_minutes, network, status_file=Non
             return EX_UNAVAILABLE
         namespace = "" if network else "unshare --net --pid --fork --mount-proc "
         directory = f"/tmp/agent-gate.{value}"
+        # The status lives in a 0700 directory of `dev`, which the untrusted `devgate` user cannot write: the command
+        # cannot forge its own exit status. A failed unpack/permission step reports "setup:<rc>" (a gate error).
+        status_dir = f"$HOME/.gate-status-{value}"
         script = (
-            f"set -eu; directory={directory}; mkdir -m 700 \"$directory\"; "
-            'tar --no-same-owner --no-same-permissions -xf - -C "$directory"; '
-            'sudo chown -hR devgate:devgate "$directory"; set +e; '
-            f"sudo {namespace}runuser -u devgate -- env -C \"$directory\" CI=true /bin/bash -c " + shlex.quote(command) + "; "
-            f'printf "%s\\n" "$?" > {directory}.rc; exit 0'
+            f'set -u; status="{status_dir}"; directory={directory}; mkdir -m 700 "$status"; '
+            'if mkdir -m 700 "$directory" && tar --no-same-owner --no-same-permissions -xf - -C "$directory" '
+            '&& sudo chown -hR devgate:devgate "$directory"; then '
+            f"sudo {namespace}runuser -u devgate -- env -C \"$directory\" CI=true /bin/bash -c " + shlex.quote(command) + '; '
+            'printf "%s\\n" "$?" > "$status/rc"; '
+            'else printf "setup:%s\\n" "$?" > "$status/rc"; fi; exit 0'
         )
         transport = subprocess.run(guest_ssh(lease, quiet=True) + ["dev@localhost", script], check=False).returncode
-        read = subprocess.run(guest_ssh(lease, quiet=True) + ["dev@localhost", f"cat {directory}.rc"], stdin=subprocess.DEVNULL,
+        read = subprocess.run(guest_ssh(lease, quiet=True) + ["dev@localhost", f'cat "{status_dir}/rc"'], stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, check=False, timeout=120)
         status = read.stdout.strip()
-        if read.returncode or not status.isdigit():
+        if read.returncode or not re.fullmatch(r"(?:setup:)?\d+", status):
             print(f"devvm: unavailable: the command did not report a status (transport exit {transport}); "
                   "the guest SSH connection failed or was lost", file=sys.stderr, flush=True)
             return EX_UNAVAILABLE
+        if status.startswith("setup:"):
+            print(f"devvm: the guest could not unpack or prepare the source ({status})", file=sys.stderr, flush=True)
         if status_file:
             Path(status_file).write_text(status + "\n")
             return 0
-        return int(status)
+        return 1 if status.startswith("setup:") else int(status)
     finally:
         try:
             # A running or partially created lease remains subject to the Windows reaper.

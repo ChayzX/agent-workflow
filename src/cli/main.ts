@@ -15,7 +15,7 @@ import { Supervisor } from '../engine/supervisor.js';
 import { Store } from '../engine/store.js';
 import { Dashboard, hashToken, coverage, providers as providerRows } from '../web/server.js';
 import { findBwrap } from '../security/sandbox.js';
-import { checkDevVmExecutable, devvm } from '../vm/devvm.js';
+import { checkDevVmExecutable, devvm, devvmSupportsStatusFile } from '../vm/devvm.js';
 import { exportRelease } from '../engine/release.js';
 import { collectDir, writeZip, extractZip } from '../util/zip.js';
 import { sha256 } from '../core/ids.js';
@@ -447,6 +447,7 @@ async function doctor(flags: Flags): Promise<number> {
       let up: boolean | null = null;
       try { up = r.exitCode === 0 ? !!JSON.parse(r.stdout).reachable : null; } catch { /* unknown */ }
       if (up === null) fail(`gate backend devvm (${cfg.vm.command}): could not query the VM host: ${(r.stderr || r.spawnError || '').trim().slice(0, 300)}`);
+      else if (!(await devvmSupportsStatusFile(cfg.vm.command!))) fail(`gate backend devvm (${cfg.vm.command}): this devvm is outdated (no gate --status-file); reinstall it from deploy/devvm/devvm`);
       else ok(`gate backend devvm (${cfg.vm.command}): gates and release verification run in throwaway VMs; host ${up ? 'reachable' : 'asleep (woken on demand)'}`);
     }
     const vmc = ctx.db.get<{ type: string; message: string }>("SELECT type, message FROM events WHERE type IN ('security.vm_backend_ok','security.vm_backend_unavailable') ORDER BY id DESC LIMIT 1");
