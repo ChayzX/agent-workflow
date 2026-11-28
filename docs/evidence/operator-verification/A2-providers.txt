@@ -1,0 +1,10 @@
+Provider  Status          Reset                    Windows
+claude    available       —                        not exposed yet
+codex     exhausted       2026-11-28 00:28:53Z (backoff) not exposed yet
+
+Live checks (no model usage):
+  claude: 2.1.332 (Claude Code); auth: ok (logged in (claude.ai))
+    capacity: not exposed without a model call (learned from rate-limit events during runs)
+  codex: codex-cli 0.172.0; auth: ok (Logged in using ChatGPT)
+    capacity: LIMITED, resets 2026-11-28 02:32:39Z; primary_300m 100% (resets 2026-11-28 02:32:39Z); secondary_10080m 16% (resets 2026-12-04 21:32:39Z)
+exit=0

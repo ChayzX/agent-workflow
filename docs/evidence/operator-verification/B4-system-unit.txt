@@ -1,0 +1,220 @@
+# B4 hardened system unit — all steps [sudo, operator approved 'tell me first']; user service for orch stopped+disabled first
+$ sudo useradd --system --create-home --home-dir /var/lib/orchestrator --shell /usr/sbin/nologin orchestrator
+exit=0
+$ sudo rm -rf /opt/orchestrator && sudo cp -a /home/orch/agent-workflow /opt/orchestrator && sudo chown -R root:root /opt/orchestrator && sudo chmod -R a+rX /opt/orchestrator
+exit=0
+$ cd /var/lib/orchestrator && sudo -u orchestrator -H ORCH_HOME=/var/lib/orchestrator /opt/orchestrator/bin/orchestrator setup
+bash: line 1: cd: /var/lib/orchestrator: Permission denied
+exit=1
+$ sudo install -m 644 /opt/orchestrator/deploy/systemd/orchestrator.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now orchestrator
+Created symlink /etc/systemd/system/multi-user.target.wants/orchestrator.service → /etc/systemd/system/orchestrator.service.
+exit=0
+$ systemd-analyze security orchestrator.service
+  NAME                                                        DESCRIPTION                                                                   EXPOSURE
+✗ RemoveIPC=                                                  Service user may leave SysV IPC objects around                                     0.1
+✗ RootDirectory=/RootImage=                                   Service runs within the host's root directory                                      0.1
+✓ User=/DynamicUser=                                          Service runs under a static non-root user identity                            
+✓ RestrictRealtime=                                           Service realtime scheduling access is restricted                              
+✓ CapabilityBoundingSet=~CAP_SYS_TIME                         Service processes cannot change the system clock                              
+✓ NoNewPrivileges=                                            Service processes cannot acquire new privileges                               
+✓ AmbientCapabilities=                                        Service process does not receive ambient capabilities                         
+✓ CapabilityBoundingSet=~CAP_BPF                              Service may load BPF programs                                                 
+✓ SystemCallArchitectures=                                    Service may execute system calls only with native ABI                         
+✗ MemoryDenyWriteExecute=                                     Service may create writable executable memory mappings                             0.1
+✗ RestrictNamespaces=~user                                    Service may create user namespaces                                                 0.3
+✗ RestrictNamespaces=~pid                                     Service may create process namespaces                                              0.1
+✗ RestrictNamespaces=~net                                     Service may create network namespaces                                              0.1
+✗ RestrictNamespaces=~uts                                     Service may create hostname namespaces                                             0.1
+✗ RestrictNamespaces=~mnt                                     Service may create file system namespaces                                          0.1
+✗ RestrictNamespaces=~cgroup                                  Service may create cgroup namespaces                                               0.1
+✗ RestrictNamespaces=~ipc                                     Service may create IPC namespaces                                                  0.1
+✗ RestrictAddressFamilies=~AF_NETLINK                         Service may allocate netlink sockets                                               0.1
+✗ RestrictAddressFamilies=~AF_UNIX                            Service may allocate local sockets                                                 0.1
+✗ RestrictAddressFamilies=~AF_(INET|INET6)                    Service may allocate Internet sockets                                              0.3
+✓ ProtectSystem=                                              Service has strict read-only access to the OS file hierarchy                  
+✓ SupplementaryGroups=                                        Service has no supplementary groups                                           
+✓ CapabilityBoundingSet=~CAP_SYS_RAWIO                        Service has no raw I/O access                                                 
+✓ CapabilityBoundingSet=~CAP_SYS_PTRACE                       Service has no ptrace() debugging abilities                                   
+✓ CapabilityBoundingSet=~CAP_SYS_(NICE|RESOURCE)              Service has no privileges to change resource use parameters                   
+✓ CapabilityBoundingSet=~CAP_NET_ADMIN                        Service has no network configuration privileges                               
+✓ CapabilityBoundingSet=~CAP_NET_(BIND_SERVICE|BROADCAST|RAW) Service has no elevated networking privileges                                 
+✓ CapabilityBoundingSet=~CAP_AUDIT_*                          Service has no audit subsystem access                                         
+✓ CapabilityBoundingSet=~CAP_SYS_ADMIN                        Service has no administrator privileges                                       
+✓ PrivateTmp=                                                 Service has no access to other software's temporary files                     
+✓ CapabilityBoundingSet=~CAP_SYSLOG                           Service has no access to kernel logging                                       
+✓ ProtectHome=                                                Service has no access to home directories                                     
+✓ PrivateDevices=                                             Service has no access to hardware devices                                     
+✗ ProtectProc=                                                Service has full access to process tree (/proc hidepid=)                           0.2
+✗ ProcSubset=                                                 Service has full access to non-process /proc files (/proc subset=)                 0.1
+✗ PrivateNetwork=                                             Service has access to the host's network                                           0.5
+✗ PrivateUsers=                                               Service has access to other users                                                  0.2
+✗ DeviceAllow=                                                Service has a device ACL with some special devices: char-rtc:r                     0.1
+✓ KeyringMode=                                                Service doesn't share key material with other services                        
+✓ Delegate=                                                   Service does not maintain its own delegated control group subtree             
+✗ SystemCallFilter=~@clock                                    Service does not filter system calls                                               0.2
+✗ SystemCallFilter=~@cpu-emulation                            Service does not filter system calls                                               0.1
+✗ SystemCallFilter=~@debug                                    Service does not filter system calls                                               0.2
+✗ SystemCallFilter=~@module                                   Service does not filter system calls                                               0.2
+✗ SystemCallFilter=~@mount                                    Service does not filter system calls                                               0.2
+✗ SystemCallFilter=~@obsolete                                 Service does not filter system calls                                               0.1
+✗ SystemCallFilter=~@privileged                               Service does not filter system calls                                               0.2
+✗ SystemCallFilter=~@raw-io                                   Service does not filter system calls                                               0.2
+✗ SystemCallFilter=~@reboot                                   Service does not filter system calls                                               0.2
+✗ SystemCallFilter=~@resources                                Service does not filter system calls                                               0.2
+✗ SystemCallFilter=~@swap                                     Service does not filter system calls                                               0.2
+✗ IPAddressDeny=                                              Service does not define an IP address allow list                                   0.2
+✓ NotifyAccess=                                               Service child processes cannot alter service state                            
+✓ ProtectClock=                                               Service cannot write to the hardware clock or system clock                    
+✓ CapabilityBoundingSet=~CAP_SYS_PACCT                        Service cannot use acct()                                                     
+✓ CapabilityBoundingSet=~CAP_KILL                             Service cannot send UNIX signals to arbitrary processes                       
+✓ ProtectKernelLogs=                                          Service cannot read from or write to the kernel log ring buffer               
+✓ CapabilityBoundingSet=~CAP_WAKE_ALARM                       Service cannot program timers that wake up the system                         
+✓ CapabilityBoundingSet=~CAP_(DAC_*|FOWNER|IPC_OWNER)         Service cannot override UNIX file/IPC permission checks                       
+✓ ProtectControlGroups=                                       Service cannot modify the control group file system                           
+✓ CapabilityBoundingSet=~CAP_LINUX_IMMUTABLE                  Service cannot mark files immutable                                           
+✓ CapabilityBoundingSet=~CAP_IPC_LOCK                         Service cannot lock memory into RAM                                           
+✓ ProtectKernelModules=                                       Service cannot load or read kernel modules                                    
+✓ CapabilityBoundingSet=~CAP_SYS_MODULE                       Service cannot load kernel modules                                            
+✓ CapabilityBoundingSet=~CAP_SYS_TTY_CONFIG                   Service cannot issue vhangup()                                                
+✓ CapabilityBoundingSet=~CAP_SYS_BOOT                         Service cannot issue reboot()                                                 
+✓ CapabilityBoundingSet=~CAP_SYS_CHROOT                       Service cannot issue chroot()                                                 
+✓ PrivateMounts=                                              Service cannot install system mounts                                          
+✓ CapabilityBoundingSet=~CAP_BLOCK_SUSPEND                    Service cannot establish wake locks                                           
+✓ CapabilityBoundingSet=~CAP_LEASE                            Service cannot create file leases                                             
+✓ CapabilityBoundingSet=~CAP_MKNOD                            Service cannot create device nodes                                            
+✓ ProtectHostname=                                            Service cannot change system host/domainname                                  
+✓ CapabilityBoundingSet=~CAP_(CHOWN|FSETID|SETFCAP)           Service cannot change file ownership/access mode/capabilities                 
+✓ CapabilityBoundingSet=~CAP_SET(UID|GID|PCAP)                Service cannot change UID/GID identities/capabilities                         
+✓ LockPersonality=                                            Service cannot change ABI personality                                         
+✓ ProtectKernelTunables=                                      Service cannot alter kernel tunables (/proc/sys, …)                           
+✓ RestrictAddressFamilies=~AF_PACKET                          Service cannot allocate packet sockets                                        
+✓ RestrictAddressFamilies=~…                                  Service cannot allocate exotic sockets                                        
+✓ CapabilityBoundingSet=~CAP_MAC_*                            Service cannot adjust SMACK MAC                                               
+✓ RestrictSUIDSGID=                                           SUID/SGID file creation by service is restricted                              
+✓ UMask=                                                      Files created by service are accessible only by service's own user by default 
+
+→ Overall exposure level for orchestrator.service: 3.8 OK :-)
+exit=0
+$ systemctl status orchestrator --no-pager | head -8
+● orchestrator.service - Agent Workflow Orchestrator supervisor
+     Loaded: loaded (/etc/systemd/system/orchestrator.service; enabled; preset: enabled)
+     Active: activating (auto-restart) (Result: exit-code) since Sat 2026-11-28 00:06:59 UTC; 7s ago
+    Process: 1352 ExecStart=/opt/orchestrator/bin/orchestrator daemon (code=exited, status=1/FAILURE)
+   Main PID: 1352 (code=exited, status=1/FAILURE)
+        CPU: 119ms
+exit=0
+$ sudo journalctl -u orchestrator -n 50 --no-pager
+Nov 28 00:06:59 orch-vm systemd[1]: Started orchestrator.service - Agent Workflow Orchestrator supervisor.
+Nov 28 00:06:59 orch-vm orchestrator[1352]:   ✖ not set up: run `orchestrator setup` first
+Nov 28 00:06:59 orch-vm systemd[1]: orchestrator.service: Main process exited, code=exited, status=1/FAILURE
+Nov 28 00:06:59 orch-vm systemd[1]: orchestrator.service: Failed with result 'exit-code'.
+exit=0
+$ cd /var/lib/orchestrator && sudo -u orchestrator -H ORCH_HOME=/var/lib/orchestrator /opt/orchestrator/bin/orchestrator logs | tail -6
+bash: line 1: cd: /var/lib/orchestrator: Permission denied
+exit=1
+--- isolate: bwrap under each restriction of the unit (transient system units as User=orchestrator)
+NoNewPrivileges=yes -> rc=0 
+ProtectSystem=strict -> rc=0 
+ProtectHome=yes -> rc=0 
+PrivateTmp=yes -> rc=0 
+PrivateDevices=yes -> rc=0 
+ProtectKernelTunables=yes -> rc=0 
+ProtectKernelModules=yes -> rc=0 
+ProtectKernelLogs=yes -> rc=0 
+ProtectControlGroups=yes -> rc=0 
+ProtectClock=yes -> rc=0 
+ProtectHostname=yes -> rc=0 
+RestrictSUIDSGID=yes -> rc=0 
+LockPersonality=yes -> rc=0 
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK -> rc=0 
+CapabilityBoundingSet= -> rc=0 
+SystemCallArchitectures=native -> rc=0 
+--- retry: previous setup step failed because the operator's wrapper cd'd into /var/lib/orchestrator as vmadmin (harness error, not product)
+$ sudo -u orchestrator -H bash -c 'cd /var/lib/orchestrator && ORCH_HOME=/var/lib/orchestrator /opt/orchestrator/bin/orchestrator setup'
+Orchestrator setup — home: /var/lib/orchestrator
+  ✔ Node 22.23.5
+  ✔ configuration written to /var/lib/orchestrator/config.json (0600)
+  ✔ database initialized at /var/lib/orchestrator/data/orchestrator.db (schema v1)
+  ⚠ claude: not authenticated. Run on this server: `claude login` (subscription) or `claude setup-token`
+  ⚠ codex: not authenticated. Run on this server: `codex login --device-auth` (ChatGPT plan)
+  ⚠ GitHub token not found. For GitHub mode create a token (classic PAT with "repo" and "project" scopes, or fine-grained with Issues/PRs/Contents RW for org repos) and save it:
+      install -m 600 /dev/null /var/lib/orchestrator/secrets/github-token && $EDITOR /var/lib/orchestrator/secrets/github-token
+  ✔ bubblewrap sandbox available
+
+Dashboard token (shown once — store it in your password manager):
+  [REDACTED]
+Dashboard: http://127.0.0.1:7420/
+
+Run `orchestrator setup --service` to install a systemd user service, or `orchestrator run` to run in the foreground.
+exit=0
+$ sudo systemctl restart orchestrator
+exit=0
+$ systemctl status orchestrator --no-pager | head -8
+● orchestrator.service - Agent Workflow Orchestrator supervisor
+     Loaded: loaded (/etc/systemd/system/orchestrator.service; enabled; preset: enabled)
+     Active: active (running) since Sat 2026-11-28 00:07:19 UTC; 10s ago
+   Main PID: 1672 (node)
+      Tasks: 7 (limit: 512)
+     Memory: 16.6M (max: 4.0G available: 2.5G peak: 20.4M)
+        CPU: 198ms
+     CGroup: /system.slice/orchestrator.service
+exit=0
+$ sudo journalctl -u orchestrator -n 50 --no-pager --since '-1min'
+Nov 28 00:06:59 orch-vm systemd[1]: Started orchestrator.service - Agent Workflow Orchestrator supervisor.
+Nov 28 00:06:59 orch-vm orchestrator[1352]:   ✖ not set up: run `orchestrator setup` first
+Nov 28 00:06:59 orch-vm systemd[1]: orchestrator.service: Main process exited, code=exited, status=1/FAILURE
+Nov 28 00:06:59 orch-vm systemd[1]: orchestrator.service: Failed with result 'exit-code'.
+Nov 28 00:07:09 orch-vm systemd[1]: orchestrator.service: Scheduled restart job, restart counter is at 1.
+Nov 28 00:07:09 orch-vm systemd[1]: Started orchestrator.service - Agent Workflow Orchestrator supervisor.
+Nov 28 00:07:10 orch-vm orchestrator[1546]:   ✖ not set up: run `orchestrator setup` first
+Nov 28 00:07:10 orch-vm systemd[1]: orchestrator.service: Main process exited, code=exited, status=1/FAILURE
+Nov 28 00:07:10 orch-vm systemd[1]: orchestrator.service: Failed with result 'exit-code'.
+Nov 28 00:07:19 orch-vm systemd[1]: Stopped orchestrator.service - Agent Workflow Orchestrator supervisor.
+Nov 28 00:07:19 orch-vm systemd[1]: Started orchestrator.service - Agent Workflow Orchestrator supervisor.
+Nov 28 00:07:19 orch-vm orchestrator[1672]: Dashboard on http://127.0.0.1:7420/
+Nov 28 00:07:19 orch-vm orchestrator[1672]: Supervisor sup_orch-vm_1672_HrxpgQ running. Ctrl-C / SIGTERM for graceful shutdown.
+exit=0
+$ sudo -u orchestrator -H bash -c 'cd /var/lib/orchestrator && ORCH_HOME=/var/lib/orchestrator /opt/orchestrator/bin/orchestrator logs | tail -6'
+2026-11-28 00:07:19Z info  supervisor.recovered   recovery: requeued 0 task(s), reaped 0 orphan process(es), 0 git repair(s)
+exit=0
+$ sudo -u orchestrator -H bash -c 'cd /var/lib/orchestrator && ORCH_HOME=/var/lib/orchestrator /opt/orchestrator/bin/orchestrator doctor'
+Doctor — /var/lib/orchestrator
+  ✔ OS: Ubuntu 24.04.5 LTS (linux); memory 3/3 GB free
+  ✔ Node 22.23.5 (need >= 22.13)
+  ✔ git version 2.43.0
+  ✔ tar available
+  ✔ bubblewrap sandbox works
+  ✔ configuration valid
+  ✔ config permissions 600
+  ✔ disk free at /var/lib/orchestrator: 15732 MB
+  ✔ database integrity: ok; schema v1
+  ✔ audit log hash chain intact
+  ✖ claude 2.1.332 (Claude Code): not authenticated — not logged in: run `claude login` or `claude setup-token`
+  ✖ codex codex-cli 0.172.0: not authenticated — not logged in: run `codex login` (or `codex login --device-auth` on a headless server)
+  ⚠ no GitHub token (needed only for GitHub mode)
+  ✔ supervisor running (pid 1672)
+
+2 problem(s) found.
+exit=1
+--- bwrap under ALL [Service] restrictions of /etc/systemd/system/orchestrator.service combined (24 properties)
+$ sudo systemd-run --wait --pipe -p User=orchestrator -p Group=orchestrator -p Environment=ORCH_HOME=/var/lib/orchestrator -p Environment=HOME=/var/lib/orchestrator -p NoNewPrivileges=yes -p ProtectSystem=strict -p ReadWritePaths=/var/lib/orchestrator -p ProtectHome=yes -p PrivateTmp=yes -p PrivateDevices=yes -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectKernelLogs=yes -p ProtectControlGroups=yes -p ProtectClock=yes -p ProtectHostname=yes -p RestrictSUIDSGID=yes -p RestrictRealtime=yes -p LockPersonality=yes -p RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK -p CapabilityBoundingSet= -p AmbientCapabilities= -p SystemCallArchitectures=native -p UMask=0077 /usr/bin/bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --unshare-all --die-with-parent true
+bwrap: Can't mount proc on /newroot/proc: Operation not permitted
+exit=1
+--- supervisor journal contains no 'sandbox unavailable' warning under the system unit:
+0
+--- isolate with the gate-sandbox flags (--proc /proc --tmpfs /tmp), one restriction at a time, User=orchestrator
+NoNewPrivileges=yes -> rc=0 
+ProtectSystem=strict -> rc=0 
+ProtectHome=yes -> rc=0 
+PrivateTmp=yes -> rc=0 
+PrivateDevices=yes -> rc=0 
+ProtectKernelTunables=yes -> rc=1 bwrap: Can't mount proc on /newroot/proc: Operation not permitted
+ProtectKernelModules=yes -> rc=0 
+ProtectKernelLogs=yes -> rc=1 bwrap: Can't mount proc on /newroot/proc: Operation not permitted
+ProtectControlGroups=yes -> rc=0 
+ProtectClock=yes -> rc=0 
+ProtectHostname=yes -> rc=0 
+RestrictSUIDSGID=yes -> rc=0 
+LockPersonality=yes -> rc=0 
+CapabilityBoundingSet= -> rc=0 
+SystemCallArchitectures=native -> rc=0 

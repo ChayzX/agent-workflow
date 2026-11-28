@@ -1,0 +1,50 @@
+
+==> Checking operating system
+  Ubuntu 24.04.5 LTS (x86_64)
+
+==> Checking dependencies
+  node v22.23.5, git 2.43.0
+
+==> Building (only if dist/ is missing — release ZIPs ship prebuilt)
+
+added 3 packages in 702ms
+npm notice
+npm notice New major version of npm available! 10.9.9 -> 12.2.3
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.2.3
+npm notice To update run: npm install -g npm@12.2.3
+npm notice
+
+> agent-workflow-orchestrator@0.1.0 build
+> tsc -p tsconfig.json && node scripts/copy-assets.mjs
+
+
+==> Linking the CLI into ~/.local/bin
+
+==> Provider CLIs (official tools; authentication stays inside them)
+npm error code EACCES
+npm error syscall mkdir
+npm error path /usr/local/lib/node_modules/@anthropic-ai
+npm error errno -13
+npm error Error: EACCES: permission denied, mkdir '/usr/local/lib/node_modules/@anthropic-ai'
+npm error     at async mkdir (node:internal/fs/promises:858:10)
+npm error     at async /usr/local/lib/node_modules/npm/node_modules/@npmcli/arborist/lib/arborist/reify.js:638:20
+npm error     at async Promise.allSettled (index 0)
+npm error     at async [reifyPackages] (/usr/local/lib/node_modules/npm/node_modules/@npmcli/arborist/lib/arborist/reify.js:334:11)
+npm error     at async Arborist.reify (/usr/local/lib/node_modules/npm/node_modules/@npmcli/arborist/lib/arborist/reify.js:149:5)
+npm error     at async Install.exec (/usr/local/lib/node_modules/npm/lib/commands/install.js:150:5)
+npm error     at async Npm.exec (/usr/local/lib/node_modules/npm/lib/npm.js:207:9)
+npm error     at async module.exports (/usr/local/lib/node_modules/npm/lib/cli/entry.js:74:5) {
+npm error   errno: -13,
+npm error   code: 'EACCES',
+npm error   syscall: 'mkdir',
+npm error   path: '/usr/local/lib/node_modules/@anthropic-ai'
+npm error }
+npm error
+npm error The operation was rejected by your operating system.
+npm error It is likely you do not have the permissions to access this file as the current user
+npm error
+npm error If you believe this might be a permissions issue, please double-check the
+npm error permissions of the file and its containing directories, or try running
+npm error the command again as root/Administrator.
+npm error A complete log of this run can be found in: /home/orch/.npm/_logs/2026-11-27T23_28_09_243Z-debug-0.log
+A1 exit=243

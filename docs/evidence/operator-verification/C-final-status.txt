@@ -1,0 +1,7 @@
+Supervisor: running (pid 63279)   Home: /home/orch/.orchestrator
+
+wordfreq [prj_d5dddd0c147541cd96e0]  ACTIVE — capacity restored; work resumed
+  Requirements verified: 0/13 mandatory (0%), implemented 0, open 13, blocked 0
+  Work items: backlog=2 cancelled=2 merge_ready=3
+
+Providers: claude=recovering(reset 2026-11-28 04:10:00Z)  codex=available

@@ -1,0 +1,29 @@
+$ systemctl --user show -p MainPID orchestrator -> 23145
+$ kill -9 23145
+exit=0
+00:04:33
+00:04:53
+$ systemctl --user status orchestrator
+● orchestrator.service - Agent Workflow Orchestrator supervisor
+     Loaded: loaded (/home/orch/.config/systemd/user/orchestrator.service; enabled; preset: enabled)
+     Active: active (running) since Sat 2026-11-28 00:04:43 UTC; 9s ago
+   Main PID: 23600 (node)
+      Tasks: 7 (limit: 512)
+     Memory: 15.6M (max: 4.0G available: 2.8G peak: 19.5M)
+        CPU: 159ms
+     CGroup: /user.slice/user-1001.slice/user@1001.service/app.slice/orchestrator.service
+new MainPID: 23600  NRestarts: 1
+$ orchestrator logs | tail -30
+2026-11-27 23:29:55Z warn  security.sandbox       agent sandbox unavailable (no bubblewrap): agents run with a scrubbed environment only
+2026-11-27 23:29:56Z info  supervisor.recovered   recovery: requeued 0 task(s), reaped 0 orphan process(es), 0 git repair(s)
+2026-11-27 23:30:00Z warn  provider.status        codex: available → exhausted (usage limit (unknown))
+2026-11-27 23:31:33Z warn  security.sandbox       agent sandbox unavailable (no bubblewrap): agents run with a scrubbed environment only
+2026-11-27 23:31:33Z info  supervisor.recovered   recovery: requeued 0 task(s), reaped 0 orphan process(es), 0 git repair(s)
+2026-11-27 23:33:00Z warn  security.sandbox       agent sandbox unavailable (no bubblewrap): agents run with a scrubbed environment only
+2026-11-27 23:33:01Z info  supervisor.recovered   recovery: requeued 0 task(s), reaped 0 orphan process(es), 0 git repair(s)
+2026-11-27 23:58:53Z warn  security.sandbox       agent sandbox unavailable (no bubblewrap): agents run with a scrubbed environment only
+2026-11-27 23:58:53Z info  supervisor.recovered   recovery: requeued 0 task(s), reaped 0 orphan process(es), 0 git repair(s)
+2026-11-28 00:04:09Z warn  security.sandbox       agent sandbox unavailable (no bubblewrap): agents run with a scrubbed environment only
+2026-11-28 00:04:10Z info  supervisor.recovered   recovery: requeued 0 task(s), reaped 0 orphan process(es), 0 git repair(s)
+2026-11-28 00:04:43Z warn  security.sandbox       agent sandbox unavailable (no bubblewrap): agents run with a scrubbed environment only
+2026-11-28 00:04:43Z info  supervisor.recovered   recovery: requeued 0 task(s), reaped 0 orphan process(es), 0 git repair(s)
