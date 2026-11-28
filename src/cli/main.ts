@@ -16,6 +16,7 @@ import { Store } from '../engine/store.js';
 import { Dashboard, hashToken, coverage, providers as providerRows } from '../web/server.js';
 import { findBwrap } from '../security/sandbox.js';
 import { checkDevVmExecutable, devvm, devvmSupportsStatusFile } from '../vm/devvm.js';
+import { EgressProxy } from '../vm/egress-proxy.js';
 import { exportRelease } from '../engine/release.js';
 import { collectDir, writeZip, extractZip } from '../util/zip.js';
 import { sha256 } from '../core/ids.js';
@@ -94,6 +95,7 @@ Service
   dashboard-token                                  Rotate the dashboard access token
   backup [--out FILE]   restore FILE   upgrade   uninstall [--purge --yes]
   self-package [--out DIR]                         Build this orchestrator's own verified release ZIP
+  egress-proxy                                     Run the agent-VM allowlist egress proxy (systemd: orchestrator-egress)
   version
 `;
 
@@ -107,6 +109,7 @@ async function main(): Promise<number> {
     case 'doctor': return doctor(flags);
     case 'run': case 'daemon': return runDaemon(flags);
     case 'self-package': return selfPackage(flags);
+    case 'egress-proxy': return egressProxy(flags);
   }
   const cfg = cfgFor(flags);
   const ctx = createApp({ cfg });
@@ -170,6 +173,11 @@ async function main(): Promise<number> {
           if (rel) out(`  Release ${rel.version}: ${rel.status} ${rel.zip_path ?? ''}`);
         }
         out('\nProviders: ' + ctx.capacity.all().map((s) => `${s.provider}=${s.status}${s.reset_at ? `(reset ${ago(s.reset_at)})` : ''}`).join('  '));
+        if ((cfg.security.agentBackend ?? 'local') === 'devvm') {
+          const leases = ctx.db.all<{ id: string; purpose: string; work_item_id: string | null; expires_at: number | null }>("SELECT id, purpose, work_item_id, expires_at FROM vm_leases WHERE status='ready' ORDER BY created_at");
+          const ev = ctx.db.get<{ type: string; message: string; ts: number }>("SELECT type, message, ts FROM events WHERE type IN ('vm.unavailable','vm.available') ORDER BY id DESC LIMIT 1");
+          out(`Agent backend: devvm — ${leases.length} VM(s): ${leases.map((l) => `${l.id.slice(0, 8)}(${l.purpose}${l.expires_at ? `, until ${ago(l.expires_at)}` : ''})`).join(' ') || 'none'}${ev?.type === 'vm.unavailable' ? ` — WAITING since ${ago(ev.ts)}: ${ev.message}` : ''}`);
+        }
         if ((cfg.security.gateBackend ?? 'local') === 'devvm') {
           const ev = ctx.db.get<{ type: string; message: string; ts: number }>("SELECT type, message, ts FROM events WHERE type IN ('gates.backend_unavailable','gates.backend_available','security.vm_backend_unavailable','security.vm_backend_ok') ORDER BY id DESC LIMIT 1");
           const waiting = ev && (ev.type === 'gates.backend_unavailable' || ev.type === 'security.vm_backend_unavailable');
@@ -376,8 +384,14 @@ function installUserService(cfg: Config): void {
   const tpl = readFileSync(join(ROOT, 'deploy', 'systemd', 'orchestrator-user.service'), 'utf8');
   const unit = tpl.replace(/@BIN@/g, bin).replace(/@HOME@/g, cfg.home).replace(/@NODE_DIR@/g, dirname(process.execPath));
   writeFileSync(join(unitDir, 'orchestrator.service'), unit);
+  const egress = readFileSync(join(ROOT, 'deploy', 'systemd', 'orchestrator-egress.service'), 'utf8').replace(/@BIN@/g, bin).replace(/@HOME@/g, cfg.home).replace(/@NODE_DIR@/g, dirname(process.execPath));
+  writeFileSync(join(unitDir, 'orchestrator-egress.service'), egress);
   try {
     execFileSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'ignore' });
+    if ((cfg.security.agentBackend ?? 'local') === 'devvm') {
+      execFileSync('systemctl', ['--user', 'enable', '--now', 'orchestrator-egress'], { stdio: 'ignore' });
+      ok('egress proxy service installed and started (orchestrator-egress.service)');
+    }
     execFileSync('systemctl', ['--user', 'enable', '--now', 'orchestrator'], { stdio: 'ignore' });
     ok('systemd user service installed and started (orchestrator.service)');
     out('  For start at boot without login: sudo loginctl enable-linger $USER   (one-time, requires your authorization)');
@@ -456,6 +470,20 @@ async function doctor(flags: Flags): Promise<number> {
   } else {
     ok('gate backend local: quality gates run in bubblewrap on this host');
   }
+  if ((cfg.security.agentBackend ?? 'local') === 'devvm') {
+    const problem = checkDevVmExecutable(cfg.vm.command);
+    (problem ? fail : ok)(problem ? `agent backend devvm: ${problem}; agents will not run` : `agent backend devvm: agents run in throwaway VMs; guest egress only through ${cfg.vm.egressProxy}`);
+    for (const [prov, file] of [['claude', join(paths(cfg).secrets, 'claude-oauth-token')], ['codex', join(paths(cfg).secrets, 'codex-auth.json')]] as const) {
+      if (!cfg.providers[prov]?.enabled) continue;
+      if (!existsSync(file)) fail(`agent VMs: ${prov} credential copy missing: ${file} (see docs/operations.md "Agent VMs")`);
+      else if (statSync(file).mode & 0o077) fail(`agent VMs: ${file} must be mode 600`);
+      else ok(`agent VMs: ${prov} credential copy present (${file}, 600)`);
+    }
+    try {
+      const r = await fetch(cfg.vm.egressProxy!, { signal: AbortSignal.timeout(5000) }).catch((e: Error) => { throw e; });
+      ok(`egress proxy ${cfg.vm.egressProxy} answers (HTTP ${r.status})`);
+    } catch (e) { fail(`egress proxy ${cfg.vm.egressProxy} is not reachable from here: ${(e as Error).message}; start it with \`systemctl --user start orchestrator-egress\``); }
+  }
   if (!/^(127\.0\.0\.1|localhost|::1)$/.test(cfg.dashboard.host)) warn(`dashboard bound to ${cfg.dashboard.host}: ensure TLS termination and network restrictions in front of it`);
   if (!cfg.dashboard.tokenHash) fail('dashboard token not configured: run `orchestrator dashboard-token`');
   ctx.db.close();
@@ -495,6 +523,18 @@ async function runDaemon(flags: Flags): Promise<number> {
 }
 
 /** Package this orchestrator itself (source + compiled dist + docs), then verify from a clean extraction. */
+async function egressProxy(flags: Flags): Promise<number> {
+  const cfg = cfgFor(flags);
+  const e = cfg.egress;
+  mkdirSync(paths(cfg).logs, { recursive: true, mode: 0o700 });
+  const proxy = new EgressProxy({ ...e, logFile: join(paths(cfg).logs, 'egress.jsonl'), cacheDir: e.cacheDir ?? join(cfg.home, 'egress-cache') });
+  const { port } = await proxy.start();
+  out(`egress proxy listening on ${e.listen}:${port}; ${e.allowHosts.length} allowlisted host pattern(s), ${e.denyHosts.length} denied; clients: ${e.allowClients.join(', ') || 'any (restrict with egress.allowClients)'}`);
+  await new Promise<void>((resolve) => { process.once('SIGTERM', resolve); process.once('SIGINT', resolve); });
+  await proxy.stop();
+  return 0;
+}
+
 async function selfPackage(flags: Flags): Promise<number> {
   const outDir = resolve(String(flags.out ?? join(ROOT, 'releases')));
   const name = `agent-workflow-orchestrator-${VERSION}`;

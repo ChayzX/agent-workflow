@@ -282,7 +282,7 @@ test('review#65 F5/F6: a symlink in a writable directory is not trusted; out-of-
   execFileSync('ln', ['-s', fake.bin, link]);
   assert.match(checkDevVmExecutable(link)!, /writable by group or others/);
   const cfg = defaultConfig(tmp());
-  cfg.vm.gate.cpus = 8;
+  cfg.vm.gate.cpus = 64;
   assert.throws(() => validateConfig(cfg), /vm\.gate\.cpus/);
 });
 

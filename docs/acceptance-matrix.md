@@ -97,6 +97,20 @@ An independent reviewer agent ran several rounds:
 | Lifecycle on the real gaming PC (`acceptance.py`) | Passed on 2026-11-28 before the integration (deploy/devvm/STATUS.md) | ⚠️ live, before integration |
 | Smoke gate 1, Wake-on-LAN | `gate-smoke.sh`, `wake_acceptance.py` (operator-run) | ⏳ unverified |
 
+## Agent sessions in VMs (0.1.2, `test/agent-vm.test.ts`, fake `devvm`)
+| Requirement | Evidence | Status |
+|---|---|---|
+| One lease per item, reused through remediation; destroyed on merge | `one lease per work item ...` | ✅ test |
+| Bundle in, patch out (agents edit in the guest; supervisor commits) | same test: product built from guest edits | ✅ test |
+| No GitHub token or provider credential on any devvm command line or in the guest env | same test + `credentials are installed ...` | ✅ test |
+| Reviews in a separate VM from implementers | same test (review tasks ran only in `review` leases) | ✅ test |
+| Egress refusal (internal resolution, IP literal, deny list, foreign client) | `egress proxy ...` | ✅ test |
+| Reaping after a crash (lease left provisioning) | `TTL is renewed ...` | ✅ test |
+| TTL renewal, expiry, rebuild from checkpoints without resume | `TTL is renewed ...`, `a lease lost mid-item ...` | ✅ test |
+| Gaming pause: work queued, no attempts burned, resumes | `during a gaming pause ...` | ✅ test |
+| Warm pool only while work is runnable; adopted by the next item | `a warm spare ...` | ✅ test |
+| Real host: firewall refusals, renew, image build, agents end to end | `egress_acceptance.py`, operator runs | ⏳ unverified |
+
 ## Not yet verified
 - A re-run of the operator procedure on the fixed build: install, units, and GitHub mode including a red-CI PR and a
   published release (#46).

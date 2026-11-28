@@ -1,0 +1,11 @@
+[Unit]
+Description=Rebuild the development VM base image (toolchains and agent CLIs, no secrets)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/devvm image-build
+NoNewPrivileges=yes
+UMask=0077
+TimeoutStartSec=2h

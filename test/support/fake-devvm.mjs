@@ -60,6 +60,7 @@ switch (op) {
   }
   case 'renew': {
     const l = readLease(rest[0]); if (!l) fail('Lease is absent');
+    if (l.expires_at <= now()) fail('Lease is not running or has expired');
     l.expires_at = now() + Number(opt(rest, '--ttl-minutes', '60')) * 60;
     writeFileSync(join(leaseDir(l.id), 'lease.json'), JSON.stringify(l)); print(l);
   }
@@ -72,6 +73,13 @@ switch (op) {
     if (l.expires_at <= now()) fail('Lease has expired');
     if (settings.dropSsh) { process.stderr.write('ssh: connection lost\n'); process.exit(255); }
     const cmd = args.slice(1)[0] === '--' ? args.slice(2) : args.slice(1);
+    // Simulate the host reaping a lease (TTL) right when the orchestrator syncs a given item for the 2nd time.
+    if (settings.loseOnSecondSync && cmd.join(' ').includes(`work/${settings.loseOnSecondSync}'.bundle`)) {
+      const f = join(state, `syncs-${settings.loseOnSecondSync}`);
+      const n = (existsSync(f) ? Number(readFileSync(f, 'utf8')) : 0) + 1;
+      writeFileSync(f, String(n));
+      if (n === 2) { rmSync(leaseDir(l.id), { recursive: true, force: true }); fail('This lease has no local receipt; use status or destroy to inspect it'); }
+    }
     process.exit(runIn(join(leaseDir(l.id), 'root'), cmd.join(' ') || 'true'));
   }
   case 'gate': {
