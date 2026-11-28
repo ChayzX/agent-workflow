@@ -174,7 +174,7 @@ def locked(folder):
     raise RuntimeError(f"Could not lock {folder}")
 
 
-def provision(value, cpus, ram_mib, disk_gib, ttl_minutes, public_key=None):
+def provision(value, cpus, ram_mib, disk_gib, ttl_minutes, public_key=None, purpose=None):
     folder = LEASES / value
     with locked(folder) as lock:
         private = folder / "identity"
@@ -186,8 +186,9 @@ def provision(value, cpus, ram_mib, disk_gib, ttl_minutes, public_key=None):
                                stdin=subprocess.DEVNULL, check=True, timeout=15)
             public = private.with_suffix(".pub").read_text().strip()
         save_json(folder / "request.json", {"ttl_minutes": ttl_minutes})
+        extra = {"purpose": purpose} if purpose else {}
         lease = request("provision", wake=True, id=value, cpus=cpus, ram_mib=ram_mib,
-                        disk_gib=disk_gib, ttl_minutes=ttl_minutes, public_key=public)
+                        disk_gib=disk_gib, ttl_minutes=ttl_minutes, public_key=public, **extra)
         if not KEY.fullmatch(lease.get("host_key") or ""):
             raise RuntimeError("Windows returned an invalid guest host key")
         (folder / "known_hosts").write_text(f'adev-{value} {lease["host_key"]}\n')
@@ -290,7 +291,11 @@ def gate(command, cpus, ram_mib, disk_gib, ttl_minutes, network, status_file=Non
         read = subprocess.run(guest_ssh(lease, quiet=True) + ["dev@localhost", f'cat "{status_dir}/rc"'], stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, check=False, timeout=120)
         status = read.stdout.strip()
-        if read.returncode or not re.fullmatch(r"(?:setup:)?\d+", status):
+        if transport == 0 and read.returncode != 255 and not re.fullmatch(r"(?:setup:)?\d+", status):
+            # The guest script ran to its end but could not record a status (e.g. the command filled the disk).
+            print("devvm: the guest finished but wrote no status (is the disk full?)", file=sys.stderr, flush=True)
+            status = "nostatus"
+        elif read.returncode or not re.fullmatch(r"(?:setup:)?\d+", status):
             print(f"devvm: unavailable: the command did not report a status (transport exit {transport}); "
                   "the guest SSH connection failed or was lost", file=sys.stderr, flush=True)
             return EX_UNAVAILABLE
@@ -299,7 +304,7 @@ def gate(command, cpus, ram_mib, disk_gib, ttl_minutes, network, status_file=Non
         if status_file:
             Path(status_file).write_text(status + "\n")
             return 0
-        return 1 if status.startswith("setup:") else int(status)
+        return int(status) if status.isdigit() else 1
     finally:
         try:
             # A running or partially created lease remains subject to the Windows reaper.
@@ -308,11 +313,47 @@ def gate(command, cpus, ram_mib, disk_gib, ttl_minutes, network, status_file=Non
             print(f"Lease {value} cleanup will be retried by the host reaper: {exc}", file=sys.stderr)
 
 
+def image_build(proxy):
+    """Build a new base image in a builder VM (toolchains + agent CLIs, no secrets) and make it current."""
+    if not re.fullmatch(r"http://[A-Za-z0-9.-]+:\d+/?", proxy or ""):
+        raise RuntimeError("image-build needs --proxy http://<chasebot>:<port> (or \"proxy\" in config.json)")
+    script = (Path(__file__).resolve().parent / "image" / "provision-guest.sh")
+    if not script.is_file():
+        script = HOME / "provision-guest.sh"
+    value = uuid.uuid4().hex
+    try:
+        lease = provision(value, 4, 8192, 32, 120, purpose="image")
+        with script.open("rb") as body:
+            done = subprocess.run(guest_ssh(lease, quiet=True) + ["dev@localhost", f"sudo PROXY={shlex.quote(proxy)} bash -s"],
+                                  stdin=body, check=False).returncode
+        if done:
+            raise RuntimeError(f"image provisioning failed in the builder VM (exit {done})")
+        return request("capture", id=value)
+    finally:
+        try:
+            destroy(value, wake=False)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            print(f"Builder lease {value} cleanup will be retried by the host reaper: {exc}", file=sys.stderr)
+
+
 def size_options(parser, ttl=60):
-    parser.add_argument("--cpus", type=int, choices=range(1, 5), default=2)
+    # Ranges are enforced by the Windows worker (host.json "ranges"), so they can follow the hardware.
+    parser.add_argument("--cpus", type=int, default=2)
     parser.add_argument("--ram-mib", type=int, default=2048)
-    parser.add_argument("--disk-gib", type=int, choices=range(8, 25), default=12)
+    parser.add_argument("--disk-gib", type=int, default=12)
     parser.add_argument("--ttl-minutes", type=int, default=ttl)
+
+
+def renew(value, ttl_minutes):
+    lease = request("renew", wake=True, id=value, ttl_minutes=ttl_minutes)
+    folder = LEASES / value
+    with locked(folder):
+        receipt = folder / "lease.json"
+        if receipt.is_file():
+            local = json.loads(receipt.read_text())
+            local["expires_at"] = lease["expires_at"]
+            save_json(receipt, local)
+    return lease
 
 
 def main():
@@ -331,6 +372,11 @@ def main():
     remote_gate.add_argument("command")
     for operation in ("status", "destroy"):
         commands.add_parser(operation).add_argument("id", type=identifier)
+    builder = commands.add_parser("image-build")
+    builder.add_argument("--proxy")
+    extend = commands.add_parser("renew")
+    extend.add_argument("id", type=identifier)
+    extend.add_argument("--ttl-minutes", type=int, default=240)
     for operation in ("list", "wake", "pause", "resume", "prune", "reachable"):
         commands.add_parser(operation)
     ssh = commands.add_parser("ssh")
@@ -351,6 +397,10 @@ def main():
         output = provision(value, args.cpus, args.ram_mib, args.disk_gib, args.ttl_minutes, args.public_key)
     elif operation == "destroy":
         output = destroy(args.id)
+    elif operation == "renew":
+        output = renew(args.id, args.ttl_minutes)
+    elif operation == "image-build":
+        output = image_build(args.proxy or json.loads((HOME / "config.json").read_text()).get("proxy"))
     elif operation == "wake":
         output = request("ping", wake=True)
     elif operation == "reachable":

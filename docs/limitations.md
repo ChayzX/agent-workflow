@@ -61,3 +61,17 @@ Stated plainly so nothing is over-claimed. See `docs/acceptance-matrix.md` for w
   tokens). It has not had a formal WCAG audit.
 - Metrics are only what providers report. Claude reports cost estimates; Codex reports tokens. No balances or costs are
   estimated by the orchestrator.
+
+## Agent VMs and the VM backend (0.1.2)
+- **Not run on the real gaming PC yet.** Everything about agent VMs is tested against a fake `devvm` only. The Windows
+  scripts (`Set-EgressFirewall.ps1`, the `renew`/`capture` operations, `image-build`) and the egress acceptance run
+  are unverified until the operator runs them.
+- **Credential sharing across VMs is not documented by the vendors.** Claude's `setup-token` token and a copied Codex
+  `auth.json` are used by several VMs at once. Neither vendor documents concurrent use or (for Codex) refresh-token
+  rotation across copies. If a provider starts rejecting the copies, the orchestrator raises a re-authentication
+  approval; `vm.codexAuthWriteBack` can keep the refreshed Codex file (operator decision).
+- **Windows Firewall rules apply per program**, so they also restrict personal VirtualBox VMs started with the same
+  binaries on that PC.
+- **Only Debian packages are cached** by the egress proxy; npm and pip traffic is HTTPS and passes through uncached.
+- **Agents in a VM run as the guest's `dev` user**, which has sudo inside its own throwaway VM. Isolation between
+  implementer and reviewer comes from separate VMs, and egress control lives outside the guest.

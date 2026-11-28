@@ -96,9 +96,9 @@ export class ClaudeAdapter implements ProviderAdapter {
     const onOuterAbort = () => ac.abort();
     req.signal?.addEventListener('abort', onOuterAbort, { once: true });
 
-    const w = req.wrap ? req.wrap(this.cfg.command, args, []) : { cmd: this.cfg.command, args };
+    const w = req.wrap ? req.wrap(this.cfg.command, args, [], env) : { cmd: this.cfg.command, args };
     const run = await runProcess(w.cmd, w.args, {
-      cwd: req.cwd, env, stdin: req.prompt, timeoutMs: req.timeoutMs, signal: ac.signal, onSpawn: req.onSpawn,
+      cwd: req.cwd, env: ('env' in w && w.env) || env, stdin: req.prompt, timeoutMs: req.timeoutMs, signal: ac.signal, onSpawn: req.onSpawn,
       transcriptPath: req.transcriptPath,
       onLine: (line) => {
         let ev: Record<string, unknown>;

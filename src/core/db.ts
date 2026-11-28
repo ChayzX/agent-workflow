@@ -181,6 +181,16 @@ const MIGRATIONS: string[] = [
 
   CREATE TABLE dashboard_sessions (token_hash TEXT PRIMARY KEY, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
   `,
+  // v2 — agent VM leases (security.agentBackend = "devvm")
+  `
+  CREATE TABLE vm_leases (
+    id TEXT PRIMARY KEY, project_id TEXT, work_item_id TEXT, purpose TEXT NOT NULL, status TEXT NOT NULL,
+    cpus INTEGER NOT NULL, ram_mib INTEGER NOT NULL, disk_gib INTEGER NOT NULL, expires_at INTEGER,
+    generation INTEGER NOT NULL DEFAULT 1, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX vm_leases_item ON vm_leases(work_item_id, status);
+  CREATE INDEX vm_leases_status ON vm_leases(status, purpose);
+  `,
 ];
 
 export class Db {

@@ -28,14 +28,41 @@ For a shell-free script, save the lease ID before provisioning and call `destroy
 | `pause`, `resume` | Close or reopen admission on an awake host. Existing jobs keep running during pause. To drain before gaming, pause, list the leases, then let them finish or explicitly destroy the ones you own. |
 | `wake` | Wake as needed and wait for the Windows worker's authenticated health response. |
 | `reachable` | Report whether the gaming PC's listener answers right now, without waking it. |
+| `renew ID [--ttl-minutes N]` | Extend a running lease to now + N minutes (at most 480). |
+| `image-build [--proxy URL]` | Build and activate a new base image (see Base image). |
 
 ## Capacity and access
 
-- Each lease allows 1–4 vCPUs, 1–4 GiB RAM, an 8–24 GiB disk, and a 1–480 minute lifetime. Defaults are 2 vCPUs, 2 GiB RAM, 12 GiB disk, and 60 minutes.
-- Windows admits at most 3 leases, 6 assigned vCPUs, 8 GiB RAM, and 72 GiB of reserved virtual disk total. It also checks for at least 8 GiB of free host RAM after the requested allocation and 30 GiB of disk headroom after counting the reservations. Limits apply to the managed pool. Host applications and manually launched VMs still consume physical resources.
-- Guests run headless at low VirtualBox process priority with a 75% vCPU execution cap. The guest configuration disables 3D acceleration, USB, clipboard sharing and drag-and-drop. Game and anti-cheat compatibility depends on the title and must be checked with that title. Pause and drain the development pool for a session that needs all host resources.
-- Windows SSH accepts only Chasebot's Ed25519 key from `<chasebot-ip>`, uses a forced management command, and permits forwarding only to the pool's loopback SSH ports. Each guest has a separate disk, NAT interface and SSH host key. Guests with standard interactive networking may reach LAN destinations through NAT. Chasebot's `<service-user>` account is the trusted controller boundary and can manage every lease. Give agents in separate trust contexts their own guest key and keep the controller key under the service account.
-- Windows holds an idle-sleep request while leases exist. A user-initiated sleep, shutdown, or power loss can interrupt work. The worker reaps abandoned and expired leases after Windows becomes available. Treat VM disks as disposable and keep source and outputs outside the lease.
+- **Development may use the whole PC.** By default the pool may take every logical CPU and all RAM except a small
+  floor kept for Windows (2 logical CPUs, 4 GiB RAM, 30 GiB disk), up to 16 leases. Per lease: 1–32 vCPUs,
+  1–64 GiB RAM, 8–512 GiB disk, 1–480 minute lifetime (renewable with `devvm renew`). Change any of it in
+  `C:\ProgramData\AIDevVM\host.json`:
+  `"reserve": {"cpus": 2, "ram_mib": 4096, "disk_gib": 30}`, `"limits": {...}` (absolute pool limits),
+  `"ranges": {"cpus": [1, 32], ...}` (per lease) and `"vm": {"cpu_cap": 100, "priority": "low"}`.
+- Guests run headless at low VirtualBox process priority, so Windows stays responsive. 3D acceleration, USB,
+  clipboard sharing and drag-and-drop are off. **`devvm pause` is the operator's manual control for gaming**: it closes
+  admission (existing leases keep running; destroy them to free everything). Nothing pauses automatically. While paused
+  or full, the orchestrator's work stays queued in its database and resumes when admission reopens.
+- Windows SSH accepts only Chasebot's Ed25519 key from `<chasebot-ip>`, uses a forced management command, and permits
+  forwarding only to the pool's loopback SSH ports. Each guest has a separate disk, NAT interface and SSH host key.
+- **Egress: guests reach only the Chasebot egress proxy.** `Set-EgressFirewall.ps1` adds Windows Firewall Block rules
+  on the VirtualBox VM processes for every destination except `<chasebot-ip>:<proxy-port>` (LAN, router, this PC,
+  Chasebot's other ports, Pantry Bot, the internet). The NAT DNS relay and host resolver are off, so guests resolve
+  nothing themselves. `chasebot-egress-firewall.sh` lets only the gaming PC use the proxy port. The proxy
+  (`orchestrator egress-proxy`) allows only allowlisted host names and refuses any name that resolves to a private,
+  loopback or link-local address. Prove every refusal with `egress_acceptance.py`.
+- Chasebot's `<service-user>` account is the trusted controller boundary and can manage every lease.
+- Windows holds an idle-sleep request while leases exist. The orchestrator keeps leases only while work needs them,
+  so the PC can sleep when idle. A user-initiated sleep, shutdown, or power loss can interrupt work; the orchestrator
+  waits, and rebuilds lost leases from its checkpoints. Treat VM disks as disposable.
+
+## Base image
+
+`devvm image-build` boots a builder VM, runs `image/provision-guest.sh` in it (git, build tools, Python, Node 22,
+Claude Code and Codex CLIs, proxy settings for apt/npm/pip; **no credentials**), and captures its disk as the new base
+image (`<DataRoot>\images\`, the newest three are kept; `images\current.json` points at the one in use). The
+`devvm-image.timer` user unit rebuilds it weekly. Set `"proxy": "http://<chasebot-ip>:3128"` in `config.json`.
+Debian package downloads are cached by the egress proxy; npm and pip downloads go through it uncached (HTTPS).
 
 ## Agent Workflow Orchestrator
 
@@ -68,6 +95,39 @@ The orchestrator can run quality gates and release verification in these VMs. Th
 
 Manual check from a scratch repository on Chasebot: `sh deploy/devvm/gate-smoke.sh` (four checks; expect four PASS lines).
 
+### Agent sessions in VMs (`security.agentBackend: "devvm"`)
+
+```json
+{
+  "security": { "agentBackend": "devvm", "gateBackend": "devvm" },
+  "supervisor": { "maxConcurrentAgents": 6 },
+  "vm": { "command": "/home/<service-user>/.local/bin/devvm", "egressProxy": "http://<chasebot-ip>:3128",
+          "agent": { "cpus": 4, "ramMib": 8192, "diskGib": 32, "ttlMinutes": 240, "renewBeforeMin": 45 },
+          "review": { "cpus": 2, "ramMib": 4096, "diskGib": 24 }, "warmPool": 1, "maxLeases": 4 },
+  "egress": { "allowClients": ["<gaming-pc-ip>"] }
+}
+```
+
+- **One VM per work item**, kept from implementation through remediation so `claude --resume` and `codex exec resume`
+  keep working; destroyed when the item is merged, cancelled or blocked. Its TTL is renewed while in use. If it is lost
+  or expires anyway, the next task builds a new one and the session is rebuilt from checkpoints (no resume).
+- **Reviews, audits, planning and other read-only tasks run in a separate per-project VM** that no implementer ever
+  runs in, so an implementing agent cannot change the reviewer's CLI config, hooks or binaries. Each read-only task
+  gets its own directory there.
+- **Workspace in, result out.** The supervisor sends a git bundle of the item's commit (and any uncommitted
+  supervisor state, such as an in-progress merge) into the guest, and takes back a binary patch of the guest
+  directory, which it applies, commits and pushes itself. Patches touching `.git` are refused. **The GitHub token never
+  enters a VM**; the agent runs with the egress proxy as its only route out.
+- **Credentials.** The Claude token (`claude setup-token`) and Codex `auth.json` live on Chasebot in
+  `$ORCH_HOME/secrets/claude-oauth-token` and `$ORCH_HOME/secrets/codex-auth.json` (mode 600) and are copied into each
+  VM over SSH stdin at provision (never on a command line, in an image, in Terraform state or in logs).
+  `vm.codexAuthWriteBack` (default false) keeps a refreshed Codex `auth.json` from a VM. The API-billing guard is
+  unchanged: no API key is ever placed in a VM.
+- **Warm pool.** `vm.warmPool` spare VMs (default 1) are kept booted only while some project has runnable work, and the
+  next work item adopts one instead of waiting ~2.5 minutes for a boot.
+- **Fallback.** If no VM can be provisioned (asleep and not waking, paused, full), tasks wait in the queue and one
+  `vm.unavailable` event is raised per outage; agents never run on Chasebot.
+
 ## Windows and Chasebot setup
 
 1. On Chasebot, generate a dedicated Ed25519 key with `ssh-keygen -t ed25519 -f ~/.local/share/devvm/windows_ed25519 -N ''`, using a data directory with mode 700. Supply only the resulting public key file to the Windows installer. Install `devvm` with mode 700 into `~/.local/bin`, and the two `devvm-prune` units in `~/.config/systemd/user`. Enable the timer with `systemctl --user daemon-reload && systemctl --user enable --now devvm-prune.timer`. Copy `config.example.json` to `~/.local/share/devvm/config.json` (mode 600) and fill in the gaming PC's LAN address, its MAC address (for Wake-on-LAN) and the LAN broadcast address.
@@ -79,6 +139,15 @@ Manual check from a scratch repository on Chasebot: `sh deploy/devvm/gate-smoke.
 The Windows program is in `C:\ProgramData\AIDevVM`. With the desktop worker, its data, VirtualBox registry, and Terraform lease state live under `E:\AIDevVM-Desktop` (the original `E:\AIDevVM` is left unused). The worker's separate `VBOX_USER_HOME` starts its own VBoxSVC, so the account's personal VirtualBox VMs are not affected.
 
 Under NEM, a fresh guest takes about 2.5 minutes to finish first boot and cloud-init, and longer when several boot at once. `devvm provision` waits up to 7 minutes (capped at the lease's expiry). The orchestrator backend adds a 20-minute VM lifecycle allowance (wake, provisioning, first boot) on top of each gate's `timeout_sec`, and gives `devvm` two minutes after SIGTERM to destroy its lease. The Debian base disk is shared read-only as the source for independent full clones. Check failed starts with `Get-ScheduledTaskInfo AIDevVM-Worker`, `Get-Content E:\AIDevVM-Desktop\worker.log -Tail 30`, and the Windows OpenSSH event log. Keep any lease records with cleanup errors so the reaper can retry them.
+
+5. **Egress lockdown (agent VMs).** On Windows (elevated): `Set-EgressFirewall.ps1 -ControllerAddress <chasebot-ip>`.
+   On Chasebot: `sudo sh deploy/devvm/chasebot-egress-firewall.sh <gaming-pc-ip>`, set `egress.allowClients` to
+   `["<gaming-pc-ip>"]` in `$ORCH_HOME/config.json`, and start `orchestrator-egress.service`. Then run
+   `python3 deploy/devvm/egress_acceptance.py --proxy http://<chasebot-ip>:3128 --chasebot <chasebot-ip> --gateway <router-ip> --pc <gaming-pc-ip> --deny-host <pantry-bot-host> ...`
+   and expect `ALL PASS`.
+6. **Base image.** `devvm image-build --proxy http://<chasebot-ip>:3128`, then enable the weekly rebuild:
+   copy `devvm-image.service` and `devvm-image.timer` to `~/.config/systemd/user/` and
+   `systemctl --user enable --now devvm-image.timer`.
 
 ## Integration decision
 

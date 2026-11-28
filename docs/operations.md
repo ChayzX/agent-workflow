@@ -72,3 +72,21 @@ also deletes `$ORCH_HOME`.
 Worktrees are removed after a work item is merged. Gate logs and transcripts accumulate under `$ORCH_HOME`; prune old
 projects' `gate-logs/` and `transcripts/` directories as needed. `doctor` fails below `supervisor.minFreeDiskMb`
 (1 GB).
+
+## Agent VMs (security.agentBackend = "devvm")
+
+Agents, gates and release verification run in throwaway VMs on the gaming PC; Chasebot runs only the control plane.
+Full setup: `deploy/devvm/README.md`. Credentials (documented vendor methods only; run as the service user):
+
+```bash
+umask 077; mkdir -p ~/.orchestrator/secrets
+claude setup-token                       # browser approval; prints a one-year token (Pro/Max). It is not saved anywhere.
+install -m 600 /dev/stdin ~/.orchestrator/secrets/claude-oauth-token    # paste the token, Enter, then Ctrl-D
+codex login --device-auth                # ChatGPT sign-in for the service user (writes ~/.codex/auth.json)
+install -m 600 ~/.codex/auth.json ~/.orchestrator/secrets/codex-auth.json
+orchestrator doctor                      # checks both copies, the VM backend and the egress proxy
+```
+
+- `orchestrator status` lists the agent VMs and says when work is waiting for the VM host.
+- Gaming: `devvm pause` closes admission; work queues durably and resumes after `devvm resume`.
+- A missing or unsafe credential copy raises a `provider_reauthentication` approval naming the file.

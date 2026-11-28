@@ -47,12 +47,31 @@ export interface Config {
     allowedRepos: string[]; sandbox: 'auto' | 'bwrap' | 'none'; agentSandbox?: 'auto' | 'bwrap' | 'none'; agentSandboxRelaxFor?: string[]; gateNetwork: boolean;
     /** Where quality-gate and release-verification commands run: bubblewrap here ('local') or throwaway VMs ('devvm'). */
     gateBackend?: 'local' | 'devvm';
+    /** Where agent sessions run: confined here ('local') or in throwaway VMs on the gaming PC ('devvm'). */
+    agentBackend?: 'local' | 'devvm';
     approvalRequiredFor: string[]; protectedPathGlobs: string[];
   };
   vm: {
     command: string | null;          // absolute path to the trusted devvm executable (deploy/devvm/devvm)
     unavailableRetryMin: number;     // while the VM host is asleep/paused/full, gates wait this long between attempts
     gate: { cpus: number; ramMib: number; diskGib: number };
+    /** Implementer VM (one per work item, kept until merge/cancel/block). TTL is renewed while in use. */
+    agent: { cpus: number; ramMib: number; diskGib: number; ttlMinutes: number; renewBeforeMin: number };
+    /** Per-project VM for read-only tasks (reviews, audits, planning); never shared with an implementer. */
+    review: { cpus: number; ramMib: number; diskGib: number };
+    warmPool: number;                // spare VMs kept booted while some project has runnable work
+    maxLeases: number;               // concurrent agent VMs (the host's own admission limits still apply)
+    egressProxy: string | null;      // http://<chasebot>:3128 — the only destination guests can reach
+    codexAuthWriteBack: boolean;     // keep Codex's refreshed auth.json from a VM (operator decision; default off)
+  };
+  egress: {
+    listen: string; port: number;    // the allowlist proxy on the control plane (orchestrator egress-proxy)
+    allowHosts: string[];            // exact host names, or ".suffix" for a domain and its subdomains
+    denyHosts: string[];             // always refused (e.g. Pantry Bot), checked before the allowlist
+    allowPorts: number[];
+    allowClients: string[];          // source addresses allowed to use the proxy (the gaming PC); empty = any
+    cacheDir: string | null;         // cache for plain-HTTP Debian package downloads (null = <home>/egress-cache)
+    cacheMaxMb: number;
   };
   dashboard: { host: string; port: number; tokenHash: string | null; sessionHours: number; trustProxy?: boolean };
   logging: { level: 'debug' | 'info' | 'warn' | 'error'; maxBytes: number; keep: number };
@@ -106,7 +125,22 @@ export function defaultConfig(home = defaultHome()): Config {
       protectedPathGlobs: ['.github/workflows/**', '**/.env', '**/*.pem', '**/id_rsa*'],
       gateBackend: 'local',
     },
-    vm: { command: null, unavailableRetryMin: 5, gate: { cpus: 2, ramMib: 2048, diskGib: 12 } },
+    vm: {
+      command: null, unavailableRetryMin: 5, gate: { cpus: 2, ramMib: 2048, diskGib: 12 },
+      agent: { cpus: 4, ramMib: 8192, diskGib: 32, ttlMinutes: 240, renewBeforeMin: 45 },
+      review: { cpus: 2, ramMib: 4096, diskGib: 24 },
+      warmPool: 1, maxLeases: 4, egressProxy: null, codexAuthWriteBack: false,
+    },
+    egress: {
+      listen: '0.0.0.0', port: 3128,
+      allowHosts: [
+        // Provider APIs and sign-in (Claude Code, Codex)
+        'api.anthropic.com', 'statsig.anthropic.com', 'chatgpt.com', '.chatgpt.com', 'api.openai.com', 'auth.openai.com',
+        // Package registries
+        'registry.npmjs.org', 'pypi.org', 'files.pythonhosted.org', 'deb.debian.org', 'security.debian.org',
+      ],
+      denyHosts: [], allowPorts: [443, 80], allowClients: [], cacheDir: null, cacheMaxMb: 4096,
+    },
     dashboard: { host: '127.0.0.1', port: 7420, tokenHash: null, sessionHours: 12 },
     logging: { level: 'info', maxBytes: 10 * 1024 * 1024, keep: 5 },
   };
@@ -160,11 +194,22 @@ export function validateConfig(cfg: Config): void {
   if (gb === 'devvm' && !(typeof cfg.vm.command === 'string' && cfg.vm.command.startsWith('/')))
     errs.push('security.gateBackend "devvm" requires vm.command (absolute path to the devvm executable)');
   pos(cfg.vm.unavailableRetryMin, 'vm.unavailableRetryMin');
-  // Sizes the devvm CLI and the Windows worker accept for one lease (deploy/devvm/host.py RANGES).
-  const g = cfg.vm.gate;
-  if (!(Number.isInteger(g.cpus) && g.cpus >= 1 && g.cpus <= 4)) errs.push('vm.gate.cpus must be an integer in 1..4');
-  if (!(Number.isInteger(g.ramMib) && g.ramMib >= 1024 && g.ramMib <= 4096)) errs.push('vm.gate.ramMib must be an integer in 1024..4096');
-  if (!(Number.isInteger(g.diskGib) && g.diskGib >= 8 && g.diskGib <= 24)) errs.push('vm.gate.diskGib must be an integer in 8..24');
+  const ab = cfg.security.agentBackend ?? 'local';
+  if (ab !== 'local' && ab !== 'devvm') errs.push('security.agentBackend must be "local" or "devvm"');
+  if (ab === 'devvm') {
+    if (!(typeof cfg.vm.command === 'string' && cfg.vm.command.startsWith('/'))) errs.push('security.agentBackend "devvm" requires vm.command');
+    if (!/^http:\/\/[A-Za-z0-9.-]+:\d+\/?$/.test(cfg.vm.egressProxy ?? '')) errs.push('security.agentBackend "devvm" requires vm.egressProxy (http://<control-plane-address>:<port>)');
+    if (cfg.vm.agent.ttlMinutes < 30 || cfg.vm.agent.ttlMinutes > 480) errs.push('vm.agent.ttlMinutes must be within 30..480');
+    if (cfg.vm.agent.renewBeforeMin >= cfg.vm.agent.ttlMinutes) errs.push('vm.agent.renewBeforeMin must be < vm.agent.ttlMinutes');
+  }
+  if (!Number.isInteger(cfg.vm.warmPool) || cfg.vm.warmPool < 0) errs.push('vm.warmPool must be an integer >= 0');
+  pos(cfg.vm.maxLeases, 'vm.maxLeases');
+  // Lease sizes: sane bounds here; the Windows worker enforces its own configured per-lease ranges (host.json).
+  for (const [n, z] of Object.entries({ gate: cfg.vm.gate, agent: cfg.vm.agent, review: cfg.vm.review })) {
+    if (!(Number.isInteger(z.cpus) && z.cpus >= 1 && z.cpus <= 32)) errs.push(`vm.${n}.cpus must be an integer in 1..32`);
+    if (!(Number.isInteger(z.ramMib) && z.ramMib >= 1024 && z.ramMib <= 65536)) errs.push(`vm.${n}.ramMib must be an integer in 1024..65536`);
+    if (!(Number.isInteger(z.diskGib) && z.diskGib >= 8 && z.diskGib <= 512)) errs.push(`vm.${n}.diskGib must be an integer in 8..512`);
+  }
   if (errs.length) throw new Error('Invalid configuration:\n - ' + errs.join('\n - '));
 }
 

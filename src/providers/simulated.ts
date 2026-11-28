@@ -2,6 +2,7 @@
 // It is clearly labelled 'simulated' everywhere it appears; it is never evidence of real
 // subscription compatibility. A behaviour function decides each invocation's outcome and may
 // edit files in the task's worktree exactly as a real agent would.
+import { runProcess } from './process.js';
 import { randomUUID } from 'node:crypto';
 import type { Clock } from '../core/clock.js';
 import type {
@@ -26,6 +27,9 @@ export class SimulatedAdapter implements ProviderAdapter {
   authOk = true;
   capacity: CapacityProbe | null = null;
   private n = 0;
+  /** Tests: honour req.wrap (agent VMs) by acting inside the directory the wrapped command runs in. */
+  followWrap = false;
+  wrapped: Array<{ cmd: string; args: string[] }> = [];
   constructor(readonly id: string, private clock: Clock, public behaviour: SimBehaviour, private caps: Partial<ProviderCapabilities> = {}) {}
 
   capabilities(): ProviderCapabilities {
@@ -45,10 +49,22 @@ export class SimulatedAdapter implements ProviderAdapter {
     const started = Date.now();
     const resumed = !!req.resumeSessionId;
     const sessionId = req.resumeSessionId ?? randomUUID();
-    this.calls.push({ provider: this.id, req, sessionId, resumed, at: this.clock.now() });
+    // With an execution wrapper that runs commands elsewhere (an agent VM), work where the wrapped command lands:
+    // run `pwd` through the wrapper and act in that directory, exactly as a real CLI would.
+    let where = req;
+    if (req.wrap && this.followWrap) {
+      const w = req.wrap('pwd', [], [], req.env);
+      this.wrapped.push(w);
+      const r = await runProcess(w.cmd, w.args, { cwd: req.cwd, env: w.env ?? req.env, timeoutMs: 120_000 });
+      if (r.exitCode !== 0) {
+        return { ok: false, sessionId, structured: null, text: r.stderr, rateLimits: [], exitCode: r.exitCode, durationMs: Date.now() - started, failure: { cls: 'unknown', message: `wrapped command failed: ${r.stderr.slice(0, 200)}` } };
+      }
+      where = { ...req, cwd: r.stdout.trim() };
+    }
+    this.calls.push({ provider: this.id, req: where, sessionId, resumed, at: this.clock.now() });
     req.onSpawn?.(process.pid);
     req.onEvent?.({ kind: 'session', data: { sessionId } });
-    const out = await this.behaviour(req, { provider: this.id, call: ++this.n, sessionId, resumed });
+    const out = await this.behaviour(where, { provider: this.id, call: ++this.n, sessionId, resumed });
     if (out.hang || out.delayMs) {
       const aborted = await new Promise<boolean>((resolve) => {
         if (req.signal?.aborted) return resolve(true);

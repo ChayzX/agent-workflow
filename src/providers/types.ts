@@ -48,7 +48,8 @@ export interface ExecRequest {
   onEvent?: (e: ProviderEvent) => void;
   onSpawn?: (pid: number) => void;
   /** Optional OS confinement applied by the supervisor; adapters pass extra scratch dirs they need writable. */
-  wrap?: (cmd: string, args: string[], extraWritable: string[]) => { cmd: string; args: string[] };
+  /** May also return the environment for the local process (e.g. devvm gets only its own minimal environment). */
+  wrap?: (cmd: string, args: string[], extraWritable: string[], env: Record<string, string>) => { cmd: string; args: string[]; env?: Record<string, string> };
   /** True when the supervisor's OS sandbox makes the working tree and repository read-only (bubblewrap). Read-only
    *  tasks may then run commands (tests, scripts) because writes are impossible, matching Codex `-s read-only`. */
   osReadOnly?: boolean;

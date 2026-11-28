@@ -20,10 +20,27 @@ import uuid
 HERE = Path(__file__).resolve().parent
 GIB = 1024 ** 3
 ID = re.compile(r"[0-9a-f]{32}")
-PORTS = range(22400, 22408)
-LIMITS = dict(max_vms=3, total_cpus=6, total_ram_mib=8192, total_disk_gib=72,
-              min_free_ram_mib=8192, min_free_disk_gib=30)
-RANGES = dict(cpus=(1, 4), ram_mib=(1024, 4096), disk_gib=(8, 24), ttl_minutes=(1, 480))
+PORTS = range(22400, 22416)
+# Development may use the whole PC. Only a small floor is kept for Windows (default: 2 logical CPUs, 4 GiB RAM,
+# 30 GiB disk). Every value can be overridden in host.json under "limits" / "ranges" / "vm"; see README.
+RESERVE = dict(cpus=2, ram_mib=4096, disk_gib=30)
+RANGES = dict(cpus=(1, 32), ram_mib=(1024, 65536), disk_gib=(8, 512), ttl_minutes=(1, 480))
+VM_DEFAULTS = dict(cpu_cap=100, priority="low")
+
+
+def default_limits(logical_cpus, total_ram_mib, reserve=RESERVE):
+    """The pool may take everything except the reserve; host checks still apply at admission time."""
+    return dict(max_vms=len(PORTS), total_cpus=max(1, logical_cpus - reserve["cpus"]),
+                total_ram_mib=max(1024, total_ram_mib - reserve["ram_mib"]), total_disk_gib=2048,
+                min_free_ram_mib=reserve["ram_mib"], min_free_disk_gib=reserve["disk_gib"])
+
+
+def total_memory_mib():
+    numbers = (ctypes.c_uint32 * 16)()
+    numbers[0] = ctypes.sizeof(numbers)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(numbers)):
+        raise ctypes.WinError()
+    return struct.unpack_from("<Q", numbers, 8)[0] // (1024 * 1024)
 
 
 def lease_id(value):
@@ -32,9 +49,9 @@ def lease_id(value):
     return value
 
 
-def validate_lease(spec):
+def validate_lease(spec, ranges=RANGES):
     cleaned = {"id": lease_id(spec.get("id"))}
-    for field, (minimum, maximum) in RANGES.items():
+    for field, (minimum, maximum) in ranges.items():
         value = spec.get(field)
         if type(value) is not int or not minimum <= value <= maximum:
             raise ValueError(f"{field} must be an integer in [{minimum}, {maximum}]")
@@ -143,6 +160,13 @@ class Host:
                                          "DEVVM_HOST": str(Path(__file__).resolve()),
                                          "DEVVM_PYTHON": sys.executable, "DEVVM_CONFIG": str(self.config_path)}
 
+    def ranges(self):
+        return RANGES | {key: tuple(value) for key, value in self.config.get("ranges", {}).items()}
+
+    def limits(self):
+        reserve = RESERVE | self.config.get("reserve", {})
+        return default_limits(os.cpu_count() or 4, total_memory_mib(), reserve) | self.config.get("limits", {})
+
     def initialize(self):
         for path in (self.leases, self.spool, self.packs, self.root / "registry"):
             path.mkdir(parents=True, exist_ok=True)
@@ -238,15 +262,18 @@ class Host:
             raise RuntimeError("VirtualBox created an unexpected machine directory")
         lease["host_key"] = create_seed(seed, lease, self.config["ssh_keygen"])
         self.write_lease(lease)
-        self.vbox("clonemedium", "disk", self.config["image"], str(disk), "--format", "VDI", timeout=120)
+        self.vbox("clonemedium", "disk", self.image(), str(disk), "--format", "VDI", timeout=240)
         self.vbox("modifymedium", "disk", str(disk), "--resize", str(lease["disk_gib"] * 1024))
+        vm_options = VM_DEFAULTS | self.config.get("vm", {})
         self.vbox("modifyvm", guid, "--cpus", str(lease["cpus"]), "--memory", str(lease["ram_mib"]),
-                  "--cpu-execution-cap", "75", "--vm-process-priority", "low", "--accelerate-3d", "off",
+                  "--cpu-execution-cap", str(vm_options["cpu_cap"]), "--vm-process-priority", vm_options["priority"], "--accelerate-3d", "off",
                   "--audio-enabled", "off", "--usb-ohci", "off", "--usb-ehci", "off", "--usb-xhci", "off",
                   "--clipboard-mode", "disabled", "--drag-and-drop", "disabled", "--nested-hw-virt", "off",
                   "--ioapic", "on", "--rtc-use-utc", "on", "--firmware", "efi64",
                   "--boot1", "disk", "--boot2", "none", "--boot3", "none", "--boot4", "none",
                   "--nic1", "nat", "--nat-localhostreachable1", "off",
+                  # No DNS through the host: guests resolve nothing themselves (all egress goes through the proxy).
+                  "--natdnshostresolver1", "off", "--natdnsproxy1", "off",
                   "--nat-pf1", f'ssh,tcp,127.0.0.1,{lease["port"]},,22')
         self.vbox("storagectl", guid, "--name", "SATA", "--add", "sata", "--controller", "IntelAhci")
         for port, kind, medium in (("0", "hdd", disk), ("1", "dvddrive", seed)):
@@ -290,18 +317,70 @@ class Host:
         shutil.rmtree(folder)
         return {"id": value, "destroyed": True}
 
+    def image(self):
+        """The base disk: the latest captured image (images/current.json) if any, else the installed one."""
+        pointer = self.root / "images" / "current.json"
+        if pointer.is_file():
+            candidate = Path(load_json(pointer)["image"])
+            if candidate.is_file() and candidate.resolve().parent == (self.root / "images").resolve():
+                return str(candidate)
+        return self.config["image"]
+
+    def capture(self, value):
+        """Turn a prepared builder lease's disk into the new base image (no secrets: builders never get credentials)."""
+        lease = self.read_lease(value)
+        if lease.get("purpose") != "image" or lease["phase"] != "running":
+            raise ValueError("Only a running image-builder lease can be captured")
+        guid = str(uuid.UUID(hex=value))
+        if self.vm_state(lease) in {"running", "paused", "stuck"}:
+            self.vbox("controlvm", guid, "acpipowerbutton")
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline and self.vm_state(lease) not in {"poweroff", "aborted"}:
+                time.sleep(2)
+            if self.vm_state(lease) not in {"poweroff", "aborted"}:
+                self.vbox("controlvm", guid, "poweroff")
+        images = self.root / "images"
+        images.mkdir(exist_ok=True)
+        name = images / f"debian13-dev-{time.strftime('%Y%m%d-%H%M%S')}.vdi"
+        self.vbox("clonemedium", "disk", str(self.machine_folder(lease) / "dev.vdi"), str(name), "--format", "VDI", timeout=600)
+        self.vbox("closemedium", "disk", str(name))
+        previous = self.image()
+        atomic_json(images / "current.json", {"image": str(name), "previous": previous, "captured_at": int(time.time())})
+        # Keep the newest three captured images for rollback.
+        for old in sorted(images.glob("debian13-dev-*.vdi"))[:-3]:
+            if str(old) != previous:
+                old.unlink(missing_ok=True)
+        return {"image": str(name), "previous": previous}
+
+    def renew(self, value, ttl_minutes):
+        """Extend a running lease's lifetime to now + ttl_minutes (at most 480 minutes from now)."""
+        low, high = self.ranges()["ttl_minutes"]
+        if type(ttl_minutes) is not int or not low <= ttl_minutes <= high:
+            raise ValueError(f"ttl_minutes must be an integer in [{low}, {high}]")
+        folder = self.directory(value)
+        if not (folder / "lease.json").is_file():
+            raise ValueError("Lease is absent")
+        lease = self.read_lease(value)
+        if lease["phase"] != "running" or lease["expires_at"] <= time.time():
+            raise ValueError("Lease is not running or has expired")
+        lease["expires_at"] = int(time.time()) + ttl_minutes * 60
+        self.write_lease(lease)
+        return self.describe(lease)
+
     def provision(self, request):
-        lease = validate_lease(request)
+        lease = validate_lease(request, self.ranges())
+        if request.get("purpose") == "image":
+            lease["purpose"] = "image"
         value = lease["id"]
         if (self.directory(value) / "lease.json").is_file():
             prior = self.read_lease(value)
-            if prior["phase"] == "running" and all(prior[key] == val for key, val in lease.items()):
+            if prior["phase"] == "running" and all(prior.get(key) == val for key, val in lease.items()):
                 return self.describe(prior)
             raise ValueError("Lease ID is already reserved with a different or incomplete request")
         if (self.root / "paused").exists():
             raise ValueError("Gaming pause is enabled")
         active = self.records()
-        check_budget(lease, active, self.config.get("limits", LIMITS), free_memory_mib(),
+        check_budget(lease, active, self.limits(), free_memory_mib(),
                      shutil.disk_usage(self.root).free // GIB)
         used_ports = {item["port"] for item in active}
         for port in PORTS:
@@ -336,13 +415,17 @@ class Host:
             return self.provision(request)
         if operation == "destroy":
             return self.destroy(lease_id(request.get("id")))
+        if operation == "capture":
+            return self.capture(lease_id(request.get("id")))
+        if operation == "renew":
+            return self.renew(lease_id(request.get("id")), request.get("ttl_minutes"))
         if operation == "status":
             value = lease_id(request.get("id"))
             if not (self.directory(value) / "lease.json").exists():
                 return {"id": value, "phase": "absent", "vm_state": "absent"}
             return self.describe(self.read_lease(value))
         if operation == "list":
-            return {"paused": (self.root / "paused").exists(),
+            return {"paused": (self.root / "paused").exists(), "limits": self.limits(),
                     "leases": [self.describe(lease) for lease in self.records()]}
         if operation == "ping":
             self.vbox("list", "vms")

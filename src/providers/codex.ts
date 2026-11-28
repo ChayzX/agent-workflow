@@ -107,9 +107,9 @@ export class CodexAdapter implements ProviderAdapter {
     const messages: string[] = [];
     try {
       const built = this.buildArgs(req, schemaPath, lastMsgPath);
-      const w = req.wrap ? req.wrap(this.cfg.command, built, [tmp]) : { cmd: this.cfg.command, args: built };
+      const w = req.wrap ? req.wrap(this.cfg.command, built, [tmp], env) : { cmd: this.cfg.command, args: built };
       const run = await runProcess(w.cmd, w.args, {
-        cwd: req.cwd, env, stdin: req.prompt, timeoutMs: req.timeoutMs, signal: req.signal, onSpawn: req.onSpawn,
+        cwd: req.cwd, env: ('env' in w && w.env) || env, stdin: req.prompt, timeoutMs: req.timeoutMs, signal: req.signal, onSpawn: req.onSpawn,
         transcriptPath: req.transcriptPath,
         onLine: (line) => {
           let ev: Record<string, any>;

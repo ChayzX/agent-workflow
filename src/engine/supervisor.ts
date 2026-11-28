@@ -17,6 +17,8 @@ import type { RouteDecision } from './router.js';
 import { schemaFor } from './schemas.js';
 import { Workflow } from './workflow.js';
 import { gateBackendSelfCheck } from './gate-backend.js';
+import { checkDevVmExecutable } from '../vm/devvm.js';
+import { credentialFiles, VmCredentialError, VmPool, VmWaitError, VM_EXIT_LOST, type LeaseRow } from '../vm/pool.js';
 
 const RUNNABLE_PROJECT = ['planning', 'debating', 'active', 'auditing', 'releasing'];
 /** Lock contents held by live Supervisor instances in this process (a same-pid lock not in here is stale). */
@@ -27,6 +29,11 @@ export interface SupervisorOptions { onIdle?: () => void; lock?: boolean }
 export class Supervisor {
   readonly instanceId = `sup_${hostname()}_${process.pid}_${randomToken(4)}`;
   readonly workflow: Workflow;
+  readonly vmPool: VmPool;
+  /** Lease used by each running task (agent backend "devvm"). */
+  private taskLeases = new Map<string, string>();
+  private vmReconcile: Promise<void> | null = null;
+  private lastVmReconcile = 0;
   private running = new Map<string, { ac: AbortController; promise: Promise<void>; provider: string }>();
   private stopping = false;
   private stopped = false;
@@ -38,6 +45,7 @@ export class Supervisor {
 
   constructor(private ctx: Ctx, private opts: SupervisorOptions = {}) {
     this.workflow = new Workflow(ctx, () => this.wake());
+    this.vmPool = new VmPool(ctx);
     this.lockPath = join(ctx.paths.home, 'supervisor.lock');
   }
 
@@ -108,6 +116,21 @@ export class Supervisor {
       this.ctx.events.emit('security.sandbox', 'quality-gate sandbox disabled by configuration (security.sandbox="none"): gate commands run unconfined', { level: 'warn' });
       this.ctx.events.audit('supervisor', 'security.gate_sandbox_disabled', {});
     }
+    if ((this.ctx.cfg.security.agentBackend ?? 'local') === 'devvm') {
+      // Agents run in throwaway VMs; nothing about them runs here. Chosen explicitly, audited, fail closed.
+      const problem = checkDevVmExecutable(this.ctx.cfg.vm.command);
+      this.ctx.events.audit('supervisor', 'security.agent_backend', { detail: { backend: 'devvm', command: this.ctx.cfg.vm.command, egressProxy: this.ctx.cfg.vm.egressProxy } });
+      if (problem) {
+        this.sandboxBlocked = `agent VM backend unusable: ${problem}. Agents will not run (they never fall back to this host).`;
+        this.ctx.events.emit('security.sandbox_unavailable', `agents will not run: ${this.sandboxBlocked}`, { level: 'error' });
+        this.ctx.events.audit('supervisor', 'security.sandbox_unavailable', { detail: { reason: this.sandboxBlocked } });
+        return;
+      }
+      const files = credentialFiles(this.ctx);
+      const missing = (['claude', 'codex'] as const).filter((p) => this.ctx.adapters.has(p) && this.ctx.cfg.providers[p]?.enabled && !existsSync(files[p]));
+      this.ctx.events.emit('security.sandbox_ok', `agents run in throwaway VMs via ${this.ctx.cfg.vm.command}; guest egress only through ${this.ctx.cfg.vm.egressProxy}${missing.length ? `; MISSING credential copies: ${missing.map((m) => files[m]).join(', ')}` : ''}`, { level: missing.length ? 'warn' : 'info' });
+      return;
+    }
     let mode: 'bwrap' | 'none';
     try { mode = agentSandboxMode(this.ctx.cfg); } catch (e) {
       // Fail closed: no agent runs until confinement works or the operator explicitly opts out (agentSandbox="none").
@@ -164,6 +187,8 @@ export class Supervisor {
     await this.sandboxSelfCheck();
     await gateBackendSelfCheck(this.ctx);
     await this.recover();
+    const reaped = await this.vmPool.recover().catch(() => 0);
+    if (reaped) this.ctx.events.emit('vm.reaped', `destroyed ${reaped} VM lease(s) left provisioning by a previous instance`, { level: 'warn' });
     this.ctx.events.audit('supervisor', 'supervisor.start', { detail: { instance: this.instanceId } });
     this.ctx.log.info('supervisor started', { instance: this.instanceId });
     this.loopPromise = this.loop();
@@ -227,9 +252,24 @@ export class Supervisor {
     }
     await this.processOutcomes();
     this.dispatch();
+    this.reconcileVms(now);
     this.updateWaitReasons();
     if (!this.running.size && !this.workflow.jobCount() && !this.ctx.queue.dispatchable(1).length) this.opts.onIdle?.();
   }
+
+  /** Renew, reap and warm agent VMs off the tick (devvm calls can take minutes). */
+  private reconcileVms(now: number): void {
+    if (!this.vmPool.enabled || this.vmReconcile || this.stopping) return;
+    if (now - this.lastVmReconcile < 30_000 && this.ticks > 1) return;
+    this.lastVmReconcile = now;
+    const runnableWork = !!this.ctx.db.get("SELECT 1 FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.status IN ('queued','running') AND p.status IN ('planning','debating','active','auditing','releasing') LIMIT 1");
+    this.vmReconcile = this.vmPool.reconcile({ runnableWork, busyLeases: new Set(this.taskLeases.values()) })
+      .catch((e) => this.ctx.log.warn('VM reconcile failed', { error: (e as Error).message }))
+      .finally(() => { this.vmReconcile = null; });
+  }
+
+  /** Tests / drain: wait for background VM housekeeping. */
+  async settleVms(): Promise<void> { await this.vmReconcile; }
 
   /** Tasks waiting for capacity become eligible once their provider (or an eligible alternative) can run. */
   private wakeWaitingCapacity(): void {
@@ -276,7 +316,8 @@ export class Supervisor {
   private dispatch(): void {
     if (this.stopping) return;
     if (this.sandboxBlocked) return; // fail closed (see sandboxSelfCheck); tasks stay queued and resume after a fixed restart
-    const max = this.ctx.cfg.supervisor.maxConcurrentAgents;
+    if (this.vmPool.enabled && this.vmPool.held()) return; // VM host asleep/paused/full: work stays queued (durable)
+    const max = this.vmPool.enabled ? Math.min(this.ctx.cfg.supervisor.maxConcurrentAgents, this.ctx.cfg.vm.maxLeases) : this.ctx.cfg.supervisor.maxConcurrentAgents;
     for (const t of this.ctx.queue.dispatchable(100)) {
       if (this.running.size >= max) return;
       if (this.ctx.queue.runningCount({ projectId: t.project_id }) >= this.ctx.cfg.supervisor.maxPerProject) continue;
@@ -396,7 +437,41 @@ export class Supervisor {
       ctx.queue.release(task.id, this.instanceId, { status: 'queued', cls: 'transient', message: `prepare failed: ${(e as Error).message}`, countAttempt: true, notBefore: ctx.clock.now() + 30_000 });
       return;
     }
-    const canResume = route.resume && adapter.capabilities().resume && !!task.session_id && task.session_provider === route.provider;
+    // Agent backend "devvm": get this task's VM and ship the workspace in before building the prompt.
+    let vm: { lease: LeaseRow; dir: string; head: string } | null = null;
+    if (this.vmPool.enabled) {
+      const keepAlive = setInterval(() => { if (!ctx.queue.heartbeat(task.id, this.instanceId, ctx.cfg.supervisor.leaseMs, null)) ac.abort(); }, ctx.cfg.supervisor.heartbeatMs);
+      try {
+        const lease = await this.vmPool.leaseFor(task);
+        const dir = this.vmPool.guestDir(task, cwd);
+        const head = await this.vmPool.syncIn(lease, this.workflow.ws(project), cwd, dir, { readOnly: !!task.read_only });
+        vm = { lease, dir, head };
+      } catch (e) {
+        if (e instanceof VmWaitError) {
+          // Not the task's fault: it waits (durable) and resumes or is rebuilt from checkpoints later.
+          ctx.queue.release(task.id, this.instanceId, { status: 'queued', cls: 'interrupted', message: e.message, countAttempt: false, notBefore: ctx.clock.now() + e.retryMs, ...(e.retryMs === 0 ? { clearSession: true } : {}) });
+        } else if (e instanceof VmCredentialError) {
+          ctx.capacity.recordFailure(route.provider, { cls: 'auth', message: e.message });
+          ctx.policy.request('provider_reauthentication', `Agent VMs cannot get ${route.provider} credentials: ${e.message}`, { requestedBy: 'supervisor', dedup: `vmcred:${route.provider}:${ctx.capacity.get(route.provider).failures}` });
+          ctx.queue.release(task.id, this.instanceId, { status: 'queued', cls: 'auth', message: e.message, countAttempt: false, notBefore: ctx.clock.now() + 60_000, pin: null });
+        } else {
+          ctx.queue.release(task.id, this.instanceId, { status: 'queued', cls: 'transient', message: `VM setup failed: ${(e as Error).message}`, countAttempt: true, notBefore: ctx.clock.now() + 30_000 });
+        }
+        return;
+      } finally { clearInterval(keepAlive); }
+      this.taskLeases.set(task.id, vm.lease.id);
+    }
+    try {
+      await this.runInWorkspace(task, route, ac, adapter, project, agent, wasRecovering, cwd, extra, vm);
+    } finally { this.taskLeases.delete(task.id); }
+  }
+
+  private async runInWorkspace(task: TaskRow, route: Extract<RouteDecision, { provider: string }>, ac: AbortController, adapter: NonNullable<ReturnType<Ctx['adapters']['get']>>,
+    project: ProjectRow, agent: ReturnType<Workflow['store']['agent']>, wasRecovering: boolean, cwd: string, extra: Record<string, string>, vm: { lease: LeaseRow; dir: string; head: string } | null): Promise<void> {
+    const ctx = this.ctx;
+    // A session can be resumed only where it ran: in the same VM (its session files live there).
+    const sameVm = !vm || json<{ vmLease?: string }>(task.input, {}).vmLease === vm.lease.id;
+    const canResume = sameVm && route.resume && adapter.capabilities().resume && !!task.session_id && task.session_provider === route.provider;
     const reconstructed = !canResume && (!!task.session_id || task.attempts > 1 || task.error_class === 'interrupted');
     if (!canResume && task.session_id && task.session_provider !== route.provider) {
       ctx.events.emit('task.failover', `${task.kind} ${task.id}: ${task.session_provider} → ${route.provider} (context reconstructed from checkpoints)`, { projectId: task.project_id, taskId: task.id, level: 'warn' });
@@ -424,13 +499,16 @@ export class Supervisor {
         onEvent: (e) => {
           if (e.kind === 'session') {
             const sid = (e.data as { sessionId?: string })?.sessionId;
-            if (sid) { ctx.queue.setSession(task.id, this.instanceId, sid, route.provider); ctx.db.run('UPDATE sessions SET provider_session_id=? WHERE id=?', sid, sessionRow); }
+            if (sid) {
+              ctx.queue.setSession(task.id, this.instanceId, sid, route.provider); ctx.db.run('UPDATE sessions SET provider_session_id=? WHERE id=?', sid, sessionRow);
+              if (vm) ctx.queue.updateInput(task.id, { vmLease: vm.lease.id });
+            }
           }
           if (e.kind === 'rate_limit') ctx.events.emit('provider.rate_limit_event', `${route.provider} rate-limit event`, { projectId: task.project_id, taskId: task.id, level: 'debug', data: e.data });
         },
         maxTurns: ctx.cfg.providers[route.provider]?.maxTurns,
-        osReadOnly: !!task.read_only && (() => { try { return agentSandboxMode(ctx.cfg) === 'bwrap'; } catch { return false; } })(),
-        wrap: (cmd, args, extra) => {
+        osReadOnly: !vm && !!task.read_only && (() => { try { return agentSandboxMode(ctx.cfg) === 'bwrap'; } catch { return false; } })(),
+        wrap: vm ? (cmd, args, extraDirs, env) => this.vmPool.wrap(vm.lease, task, cwd, vm.dir, cmd, args, extraDirs, env) : (cmd, args, extra) => {
           // The shared repository (including this worktree's admin dir) is read-only for agents and the
           // worktree's `.git` pointer is re-bound read-only: agents edit files, the supervisor owns git.
           const repoGit = join(project.workspace_dir, 'repo.git');
@@ -446,7 +524,27 @@ export class Supervisor {
     } finally {
       clearInterval(hb);
     }
-    if (route.provider === 'claude' && this.claudeState.verifyAndRestore()) {
+    if (vm) {
+      if (ac.signal.aborted || (!result.ok && result.failure?.cls === 'timeout')) await this.vmPool.killRemote(vm.lease, task.id);
+      if (!result.ok && result.exitCode !== null && VM_EXIT_LOST.has(result.exitCode)) {
+        // The VM connection failed, not the agent: no attempt is counted; the guest keeps its state for a resume.
+        result = { ...result, failure: { cls: 'interrupted', message: `VM connection lost (devvm exit ${result.exitCode}); the task resumes when the VM is reachable` } };
+      }
+      await this.vmPool.afterRun(vm.lease, route.provider);
+      if (result.ok && !task.read_only) {
+        try {
+          const back = await this.vmPool.syncOut(vm.lease, this.workflow.ws(project), cwd, vm.dir, vm.head);
+          ctx.events.emit('vm.result', `${task.kind}: ${back.files} changed file(s) returned from VM ${vm.lease.id.slice(0, 8)}`, { projectId: task.project_id, taskId: task.id, level: 'debug' });
+        } catch (e) {
+          const wait = e instanceof VmWaitError;
+          ctx.queue.release(task.id, this.instanceId, { status: 'queued', cls: wait ? 'interrupted' : 'transient', message: `could not take the result back from the VM: ${(e as Error).message}`, countAttempt: !wait, notBefore: ctx.clock.now() + (wait ? (e as VmWaitError).retryMs : 30_000) });
+          return;
+        }
+      } else if (result.ok) {
+        await this.vmPool.cleanupDir(vm.lease, vm.dir);
+      }
+    }
+    if (route.provider === 'claude' && !vm && this.claudeState.verifyAndRestore()) {
       ctx.events.emit('security.provider_config_tamper', `reverted mcpServers changes in ~/.claude.json after task ${task.id}`, { projectId: task.project_id, taskId: task.id, level: 'error' });
       ctx.events.audit('supervisor', 'security.provider_config_tamper', { projectId: task.project_id, target: task.id });
     }
@@ -546,9 +644,10 @@ export class Supervisor {
 
   /** Wait until all in-flight agent runs and deterministic jobs have finished (tests / drain). */
   async settle(): Promise<void> {
-    for (let i = 0; i < 100 && (this.running.size || this.workflow.jobCount()); i++) {
+    for (let i = 0; i < 100 && (this.running.size || this.workflow.jobCount() || this.vmReconcile); i++) {
       await Promise.allSettled([...this.running.values()].map((r) => r.promise));
       await this.workflow.drainJobs();
+      await this.vmReconcile;
     }
   }
 }

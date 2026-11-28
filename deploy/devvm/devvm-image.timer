@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly rebuild of the development VM base image
+
+[Timer]
+OnCalendar=Sun *-*-* 04:17
+Persistent=true
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target

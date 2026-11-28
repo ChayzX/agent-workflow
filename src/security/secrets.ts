@@ -38,8 +38,11 @@ export function scanText(path: string, text: string, opts: { longLines?: boolean
         const m = re.exec(piece);
         if (!m) continue;
         // Export scans (longLines) honour an allow marker only right next to the match, not anywhere in a long line.
-        const context = opts.longLines ? piece.slice(Math.max(0, m.index - 40), m.index + m[0].length + 40) : piece;
-        if (!ALLOW_MARKER.test(context)) hits.push({ path, line: i + 1, rule, excerpt: (opts.longLines ? context : piece).trim().slice(0, 80).replace(/[A-Za-z0-9+/_-]{12,}/g, (x) => x.slice(0, 4) + '…') });
+        // For a piece of a very long line, an allow marker counts only right next to the match (anything can appear
+        // somewhere in a minified bundle); ordinary lines keep whole-line marker semantics.
+        const long = line.length > 4000;
+        const context = long ? piece.slice(Math.max(0, m.index - 40), m.index + m[0].length + 40) : piece;
+        if (!ALLOW_MARKER.test(context)) hits.push({ path, line: i + 1, rule, excerpt: context.trim().slice(0, 80).replace(/[A-Za-z0-9+/_-]{12,}/g, (x) => x.slice(0, 4) + '…') });
       }
       if (hits.some((h) => h.line === i + 1 && h.path === path)) break;
     }

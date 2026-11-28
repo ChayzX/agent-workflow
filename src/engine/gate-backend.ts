@@ -50,7 +50,7 @@ export async function gateBackendSelfCheck(ctx: Ctx): Promise<void> {
     return;
   }
   if (!(await devvmSupportsStatusFile(ctx.cfg.vm.command!))) {
-    s.blocked = `the devvm at ${ctx.cfg.vm.command} is outdated (no gate --status-file): reinstall it from deploy/devvm/devvm. Gates will not run until then.`;
+    s.blocked = `the devvm at ${ctx.cfg.vm.command} is outdated (no gate --status-file): reinstall it from deploy/devvm/devvm, then restart the supervisor. Gates will not run until then.`;
     ctx.events.emit('security.vm_backend_unavailable', s.blocked, { level: 'error' });
     ctx.events.audit('supervisor', 'security.vm_backend_unavailable', { detail: { reason: 'devvm lacks --status-file' } });
     return;
@@ -70,7 +70,8 @@ export function assertGatesRunnable(ctx: Ctx): void {
     s.recheckAt = ctx.clock.now() + ctx.cfg.vm.unavailableRetryMin * 60_000;
     s.checked = true;
   }
-  if (s.blocked && ctx.clock.now() >= s.recheckAt) {
+  // An outdated devvm (no --status-file) stays blocked until the supervisor restarts after the reinstall.
+  if (s.blocked && !s.blocked.includes('is outdated') && ctx.clock.now() >= s.recheckAt) {
     // The operator may have fixed the executable: re-check once per retry interval, no restart needed.
     const problem = checkDevVmExecutable(ctx.cfg.vm.command);
     s.recheckAt = ctx.clock.now() + ctx.cfg.vm.unavailableRetryMin * 60_000;

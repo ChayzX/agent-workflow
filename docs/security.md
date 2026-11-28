@@ -76,6 +76,13 @@ These require an operator approval (`orchestrator approvals`, or the dashboard):
   every start and reported by `doctor`. The `devvm` executable must be a trusted file (absolute path, owned by root or
   the service user, nothing group/world-writable). If the VM host is unavailable, gates wait and retry; they never fall
   back to this host. Credentials found by the built-in scan block the export.
+- **Agent backend.** With `security.agentBackend: "devvm"` every agent session runs in a throwaway VM: one per work
+  item (kept through remediation, destroyed on merge/cancel/block) and a separate per-project VM for read-only work,
+  so implementers cannot tamper with reviewers' environments. Only a git bundle goes in and only a binary patch comes
+  back; the supervisor alone commits and pushes. The GitHub token never enters a VM. Provider credentials are copied
+  in over SSH stdin from 0600 files and never appear on command lines, images or logs. Guests reach only the egress
+  proxy (Windows Firewall rules on the VM processes, no DNS), and the proxy allows only allowlisted names that resolve
+  to public addresses. The selection is audited at start; if the VM host is unusable, agents wait and never run here.
 - **Without a working bubblewrap, gate commands do not run**: each gate is recorded as an error with the reason (fail closed). Only an explicit `security.sandbox: "none"` runs them unconfined.
 - **The dashboard has a single operator role.** There are no per-user accounts.
 - **HawkScan DAST was not run** in the build environment, because installing the hawk CLI was not permitted there. A

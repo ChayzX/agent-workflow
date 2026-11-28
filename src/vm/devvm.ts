@@ -148,6 +148,7 @@ export async function runVmCommand(executable: string, prepared: PreparedSource,
     const r = await devvm(executable, args, { stdin: createReadStream(prepared.archive), timeoutMs: budgetMs });
     if (existsSync(statusFile)) {
       const status = readFileSync(statusFile, 'utf8').trim();
+      if (status === 'nostatus') return { ...r, exitCode: null, unavailable: false, sandbox, spawnError: 'the VM ran the command but could not record its status (is vm.gate.diskGib large enough?)' };
       const setup = /^setup:(\d+)$/.exec(status);
       // The guest could not unpack or prepare the source (e.g. the disk is too small): a gate error, not an outage.
       if (setup) return { ...r, exitCode: null, unavailable: false, sandbox, spawnError: `the VM could not prepare the source for this command (setup step exited ${setup[1]}; is vm.gate.diskGib large enough?)` };

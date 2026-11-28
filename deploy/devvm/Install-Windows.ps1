@@ -270,7 +270,7 @@ exit $LASTEXITCODE
     $privateKeyAcl.SetSecurityDescriptorSddlForm('D:P(A;;FA;;;SY)(A;;FA;;;BA)', [Security.AccessControl.AccessControlSections]::Access)
     Set-Acl -LiteralPath $hostKey -AclObject $privateKeyAcl
     Invoke-Checked icacls.exe @($keyFile, '/setowner', '*S-1-5-32-544')
-    $ports = (22400..22407 | ForEach-Object { "127.0.0.1:$_" }) -join ' '
+    $ports = (22400..22415 | ForEach-Object { "127.0.0.1:$_" }) -join ' '
     $keyLocation = $hostKey.Replace('\','/')
     $authLocation = $keyFile.Replace('\','/')
     $cmd = '{0} -I {1} ssh' -f $Python,(Join-Path $app 'host.py')
