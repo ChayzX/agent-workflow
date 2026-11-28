@@ -408,6 +408,12 @@ export class Workflow {
    * successful push, an operator unblock or a human reopen ends the streak). While backing off, the item does not take
    * the project's integration slot.
    */
+  /** Ends a failure streak. Durable (checkpoint, not the in-memory backoff map), so a restart cannot leave a stale streak. */
+  private onPushSuccess(p: ProjectRow, w: WorkItemRow): void {
+    this.pushRetryAt.delete(w.id);
+    if (this.epoch(w, 'push_failed', true, ['push_ok']) > 0) this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'push_ok', summary: 'push succeeded after earlier failures' });
+  }
+
   private onPushFailure(p: ProjectRow, w: WorkItemRow, message: string): void {
     this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'push_failed', summary: message.slice(0, 1000) });
     this.ctx.events.emit('git.push_failed', `${w.key}: push failed: ${message.slice(0, 300)}`, { projectId: p.id, level: 'warn' });
@@ -466,7 +472,7 @@ export class Workflow {
       if ((this.pushRetryAt.get(w.id) ?? 0) > this.ctx.clock.now()) return; // backing off after a failed push
       try {
         await ws.push(w.branch!, true);
-        if (this.pushRetryAt.delete(w.id)) this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'push_ok', summary: 'push succeeded after earlier failures' });
+        this.onPushSuccess(p, w);
       } catch (e) {
         this.onPushFailure(p, w, (e as Error).message);
         return;

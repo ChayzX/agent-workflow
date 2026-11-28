@@ -50,7 +50,7 @@ export class CodexAdapter implements ProviderAdapter {
     const rpc = new AppServerClient(w.cmd, this.baseEnv, 15_000, w.args);
     try {
       await rpc.start();
-      await rpc.request('initialize', { clientInfo: { name: 'agent-workflow-orchestrator', title: null, version: '0.1.0' }, capabilities: null });
+      await rpc.request('initialize', { clientInfo: { name: 'agent-workflow-orchestrator', title: null, version: '0.1.1' }, capabilities: null });
       rpc.notify('initialized');
       const acct = (await rpc.request('account/read', { refreshToken: false })) as { account: { type: string } | null; requiresOpenaiAuth: boolean };
       if (!acct.account) return { available: false, windows: [], detail: 'auth_required' };

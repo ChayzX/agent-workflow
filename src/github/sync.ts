@@ -108,6 +108,8 @@ export class GitHubSync {
     if (!issue) issue = (await this.markedIssues()).get(`${kind}:${key}`);
     if (!issue) {
       issue = await this.client.request<IssueLite>('POST', `${this.r}/issues`, { title: spec.title, body, labels, milestone: spec.milestone ?? undefined });
+      // Issues cannot be created closed: an item that is already finished at its first sync is closed right away.
+      if (spec.state === 'closed') issue = await this.client.request<IssueLite>('PATCH', `${this.r}/issues/${issue.number}`, { state: 'closed', state_reason: spec.stateReason ?? 'completed' });
       this.issueCache?.set(`${kind}:${key}`, issue);
       this.events.emit('github.issue.created', `#${issue.number} ${spec.title}`, { projectId: this.projectId });
     } else {
@@ -268,7 +270,12 @@ export class GitHubSync {
       const recorded = json<{ state?: string }>(this.mapped('work-item', w.key)?.extra, {}).state;
       if (i.state === implied) continue;
       if (recorded && i.state === recorded) continue;
-      if (!recorded && i.state === 'open') continue; // mapping from before state tracking: the next sync closes it
+      if (!recorded && i.state === 'open') {
+        // Mapping from before state tracking (≤ 0.1.0): a human reopen cannot be told apart from sync lag. Force one
+        // re-sync so the issue matches local state and its state is recorded; changes are tracked exactly from then on.
+        this.db.run('UPDATE work_items SET updated_at=? WHERE id=? AND updated_at<=?', this.clock.now() + 1, w.id, this.clock.now());
+        continue;
+      }
       if (w.status === 'merging' && i.state === 'closed' && i.state_reason !== 'not_planned') continue; // PR merge pending detection
       if (i.state === 'closed') changes.push({ key: w.key, change: i.state_reason === 'not_planned' ? 'closed_not_planned' : 'closed' });
       else changes.push({ key: w.key, change: 'reopened' });

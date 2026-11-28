@@ -612,8 +612,10 @@ test('operator verification #31: rejected pushes never retry in a tight loop (sc
     h.ctx.db.run("UPDATE projects SET status='active' WHERE id=?", p0.id);
     (wf as any).advanceActive(wf.store.project(p0.id)!);
     assert.equal(jobs.has(`integration:${p0.id}`), false, 'no integration job for an item in backoff');
-    // A successful push ends the streak: the count is consecutive, not cumulative.
-    h.ctx.db.run('INSERT INTO checkpoints(id, project_id, work_item_id, task_id, kind, summary, data, created_at) VALUES (?,?,?,?,?,?,?,?)', 'ck-ok', p0.id, w.id, null, 'push_ok', 'ok', '{}', h.clock.now());
+    // A successful push ends the streak even after a restart lost the in-memory backoff map.
+    (wf as any).pushRetryAt.clear();
+    (wf as any).onPushSuccess(proj, w);
+    assert.ok(h.ctx.db.get("SELECT 1 FROM checkpoints WHERE work_item_id=? AND kind='push_ok'", w.id), 'push_ok recorded without in-memory state');
     h.clock.advance(1);
     (wf as any).onPushFailure(proj, w, 'error: RPC failed; curl 56 connection reset');
     assert.equal(wf.store.workItemByKey(p0.id, 'W-003')!.status, 'merge_ready', 'streak restarted after a successful push');
