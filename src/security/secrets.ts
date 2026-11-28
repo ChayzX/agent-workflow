@@ -22,19 +22,33 @@ export function isForbiddenFile(rel: string): boolean {
   return FORBIDDEN_FILES.some((re) => re.test(rel));
 }
 
-export function scanText(path: string, text: string): SecretHit[] {
+/** `longLines`: scan lines over 4000 characters in overlapping windows instead of skipping them (exports). */
+export function scanText(path: string, text: string, opts: { longLines?: boolean } = {}): SecretHit[] {
   const hits: SecretHit[] = [];
   const lines = text.split('\n');
   lines.forEach((line, i) => {
-    if (line.length > 4000) return;
-    for (const [rule, re] of RULES) {
-      if (re.test(line) && !ALLOW_MARKER.test(line)) hits.push({ path, line: i + 1, rule, excerpt: line.trim().slice(0, 80).replace(/[A-Za-z0-9+/_-]{12,}/g, (m) => m.slice(0, 4) + '…') });
+    let pieces = [line];
+    if (line.length > 4000) {
+      if (!opts.longLines) return;
+      pieces = [];
+      for (let at = 0; at < line.length; at += 3800) pieces.push(line.slice(at, at + 4000)); // 200-char overlap
+    }
+    for (const piece of pieces) {
+      for (const [rule, re] of RULES) {
+        const m = re.exec(piece);
+        if (!m) continue;
+        // Export scans (longLines) honour an allow marker only right next to the match, not anywhere in a long line.
+        const context = opts.longLines ? piece.slice(Math.max(0, m.index - 40), m.index + m[0].length + 40) : piece;
+        if (!ALLOW_MARKER.test(context)) hits.push({ path, line: i + 1, rule, excerpt: (opts.longLines ? context : piece).trim().slice(0, 80).replace(/[A-Za-z0-9+/_-]{12,}/g, (x) => x.slice(0, 4) + '…') });
+      }
+      if (hits.some((h) => h.line === i + 1 && h.path === path)) break;
     }
   });
   return hits;
 }
 
-export function scanTree(root: string, opts: { includeDeps?: boolean } = {}): SecretHit[] {
+/** `exhaustive`: scan large and binary files too (used for anything exported off this host); unreadably large files are hits. */
+export function scanTree(root: string, opts: { includeDeps?: boolean; exhaustive?: boolean } = {}): SecretHit[] {
   const hits: SecretHit[] = [];
   const walk = (dir: string) => {
     for (const name of readdirSync(dir)) {
@@ -50,6 +64,12 @@ export function scanTree(root: string, opts: { includeDeps?: boolean } = {}): Se
       }
       if (st.isDirectory()) { walk(p); continue; }
       if (isForbiddenFile(rel)) { hits.push({ path: rel, line: 0, rule: 'forbidden-file', excerpt: 'credential-bearing file type' }); continue; }
+      if (opts.exhaustive) {
+        if (st.size > 512 * 1024 * 1024) { hits.push({ path: rel, line: 0, rule: 'unscannable-size', excerpt: 'file too large to scan before export' }); continue; }
+        const buf = readFileSync(p);
+        hits.push(...scanText(rel, buf.includes(0) ? buf.toString('latin1') : buf.toString('utf8'), { longLines: true }));
+        continue;
+      }
       if (st.size > 2 * 1024 * 1024) continue;
       const buf = readFileSync(p);
       if (buf.includes(0)) continue; // binary

@@ -71,6 +71,11 @@ These require an operator approval (`orchestrator approvals`, or the dashboard):
   - `~/.claude.json` must stay writable, so its `mcpServers` entries are snapshotted at startup, and any change during an
     agent run is reverted and audited.
 - **Supervisor git operations** run with hooks disabled (`core.hooksPath=/dev/null`), `fsmonitor` off and `ext::` transport disabled. The shared repository config is reduced to an allowlist before every fetch and push, so agents cannot redirect authenticated pushes (`url.*.insteadOf`, `http.*`, `include.*`, credential helpers).
+- **Gate backend.** `security.gateBackend` selects where gate and release-verification commands run: `local`
+  (bubblewrap here) or `devvm` (a fresh VM per command on the gaming PC, `deploy/devvm/`). The choice is audited at
+  every start and reported by `doctor`. The `devvm` executable must be a trusted file (absolute path, owned by root or
+  the service user, nothing group/world-writable). If the VM host is unavailable, gates wait and retry; they never fall
+  back to this host. Credentials found by the built-in scan block the export.
 - **Without a working bubblewrap, gate commands do not run**: each gate is recorded as an error with the reason (fail closed). Only an explicit `security.sandbox: "none"` runs them unconfined.
 - **The dashboard has a single operator role.** There are no per-user accounts.
 - **HawkScan DAST was not run** in the build environment, because installing the hawk CLI was not permitted there. A

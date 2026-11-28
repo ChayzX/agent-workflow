@@ -16,6 +16,7 @@ import type { Ctx } from './ctx.js';
 import type { RouteDecision } from './router.js';
 import { schemaFor } from './schemas.js';
 import { Workflow } from './workflow.js';
+import { gateBackendSelfCheck } from './gate-backend.js';
 
 const RUNNABLE_PROJECT = ['planning', 'debating', 'active', 'auditing', 'releasing'];
 /** Lock contents held by live Supervisor instances in this process (a same-pid lock not in here is stale). */
@@ -161,6 +162,7 @@ export class Supervisor {
   async start(): Promise<void> {
     if (this.opts.lock !== false) this.acquireLock();
     await this.sandboxSelfCheck();
+    await gateBackendSelfCheck(this.ctx);
     await this.recover();
     this.ctx.events.audit('supervisor', 'supervisor.start', { detail: { instance: this.instanceId } });
     this.ctx.log.info('supervisor started', { instance: this.instanceId });

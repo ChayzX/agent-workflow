@@ -128,18 +128,12 @@ export class Workspace {
     if (!existsSync(join(this.integration, '.git'))) {
       const hasBranch = (await git(this.bare, ['rev-parse', '--verify', '--quiet', `refs/heads/${this.defaultBranch}`], { allowFail: true })).code === 0;
       if (!hasBranch) {
-        // Empty repository: create the default branch with an initial commit.
-        await git(this.bare, ['worktree', 'add', '--orphan', '-b', this.defaultBranch, this.integration], { allowFail: true }).then(async (r) => {
-          if (r.code !== 0) {
-            mkdirSync(this.integration, { recursive: true });
-            await git(this.bare, ['worktree', 'add', '--detach', this.integration]);
-            await git(this.integration, ['checkout', '--orphan', this.defaultBranch]);
-          }
-        });
-        await git(this.integration, ['commit', '--allow-empty', '-m', 'chore: initialize repository']);
-      } else {
-        await git(this.bare, ['worktree', 'add', this.integration, this.defaultBranch]);
+        // Git 2.39 cannot add a worktree until the bare repository has its first commit.
+        const tree = (await git(this.bare, ['mktree'], { input: '' })).stdout.trim();
+        const initial = (await git(this.bare, ['commit-tree', tree, '-m', 'chore: initialize repository'])).stdout.trim();
+        await git(this.bare, ['update-ref', '--stdin'], { input: `create refs/heads/${this.defaultBranch} ${initial}\n` });
       }
+      await git(this.bare, ['worktree', 'add', this.integration, this.defaultBranch]);
     }
     await this.recover();
   }

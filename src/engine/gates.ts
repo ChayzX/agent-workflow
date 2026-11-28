@@ -9,6 +9,8 @@ import type { QualityGate } from '../core/types.js';
 import { gateEnv, runSandboxed } from '../security/sandbox.js';
 import { scanTree } from '../security/secrets.js';
 import type { Ctx } from './ctx.js';
+import { assertGatesRunnable, gateBackendKind, GateBackendUnavailableError, gatesRanOk, holdGates } from './gate-backend.js';
+import { prepareVmSource, runVmCommand } from '../vm/devvm.js';
 
 export interface GateResult { name: string; required: boolean; status: 'pass' | 'fail' | 'error'; exitCode: number | null; durationMs: number; excerpt: string; logPath: string; sandbox: string }
 export interface GateSummary { passed: boolean; results: GateResult[]; commit: string }
@@ -29,16 +31,31 @@ export async function runGates(ctx: Ctx, opts: { projectId: string; workItemId: 
   mkdirSync(logDir, { recursive: true, mode: 0o700 });
   const home = join(ctx.paths.home, 'gate-home', opts.projectId);
   mkdirSync(home, { recursive: true, mode: 0o700 });
+  // Throws (nothing recorded) when the configured backend cannot run gates now; callers retry later.
+  assertGatesRunnable(ctx);
+  const vm = gateBackendKind(ctx.cfg) === 'devvm';
+  // Never export credentials to a VM: the exact archive is built once and scanned exhaustively before any export.
+  const prepared = vm ? await prepareVmSource({ kind: 'git', cwd: opts.cwd, gitDir: opts.gitDir, commit: opts.commit }) : null;
+  const blockExport = !!prepared?.hits.length;
+  try {
 
   for (const g of opts.gates) {
     const started = ctx.clock.now();
-    const r = await runSandboxed(
+    const timeoutMs = (g.timeout_sec ?? 900) * 1000;
+    const r = prepared ? await runVmCommand(ctx.cfg.vm.command!, prepared, g.command, ctx.cfg.security.gateNetwork, timeoutMs, ctx.cfg.vm.gate)
+      : await runSandboxed(
       ctx.cfg,
       { cwd: opts.cwd, writable: [opts.cwd, home], readOnly: opts.gitDir ? [opts.gitDir] : [], hide: [ctx.paths.home], network: ctx.cfg.security.gateNetwork, readOnlyLast: [join(opts.cwd, '.git')] },
       g.command,
       gateEnv(ctx.cfg, home),
-      (g.timeout_sec ?? 900) * 1000,
+      timeoutMs,
     );
+    if (vm && 'unavailable' in r && r.unavailable) {
+      // The VM never ran (or lost) the command: this is not a gate result. Wait and retry; never run it here.
+      const reason = `${g.name}: ${(r.spawnError ?? r.stderr).trim().split('\n').filter((l) => /devvm|ssh|unavailable/i.test(l)).slice(-2).join(' ') || `devvm exited ${r.exitCode}`}`;
+      holdGates(ctx, reason);
+      throw new GateBackendUnavailableError(reason);
+    }
     const out = `$ ${g.command}\n${r.stdout}\n${r.stderr}${r.timedOut ? '\n[timed out]' : ''}${r.spawnError ? `\n[spawn error] ${r.spawnError}` : ''}`;
     const logPath = join(logDir, `${g.name.replace(/[^a-z0-9_.-]/gi, '_')}.log`);
     writeFileSync(logPath, redact(out), { mode: 0o600 });
@@ -51,10 +68,11 @@ export async function runGates(ctx: Ctx, opts: { projectId: string; workItemId: 
       results.at(-1)!.excerpt, logPath, started,
     );
   }
+  } finally { prepared?.dispose(); }
 
-  // Built-in, always-required secret scan of the tree.
+  // Built-in, always-required secret scan of the tree (with the VM backend: of exactly what was exported).
   const t0 = Date.now();
-  const hits = scanTree(opts.cwd);
+  const hits = prepared ? prepared.hits : scanTree(opts.cwd);
   const secretOut = hits.length ? hits.map((h) => `${h.path}:${h.line} ${h.rule} ${h.excerpt}`).join('\n') : 'no secrets detected';
   const secretLog = join(logDir, `${BUILTIN_SECRET_GATE}.log`);
   writeFileSync(secretLog, secretOut, { mode: 0o600 });
@@ -66,6 +84,7 @@ export async function runGates(ctx: Ctx, opts: { projectId: string; workItemId: 
     Date.now() - t0, secretOut.slice(0, 2000), secretLog, ctx.clock.now(),
   );
 
+  if (vm && !blockExport) gatesRanOk(ctx);
   const passed = results.every((r) => !r.required || r.status === 'pass');
   ctx.events.emit('gates.completed', `${opts.scope} gates on ${opts.commit.slice(0, 8)}: ${passed ? 'PASS' : 'FAIL'} (${results.map((r) => `${r.name}=${r.status}`).join(', ')})`, { projectId: opts.projectId, level: passed ? 'info' : 'warn' });
   return { passed, results, commit: opts.commit };

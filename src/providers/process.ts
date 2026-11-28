@@ -3,12 +3,13 @@
 import { spawn } from 'node:child_process';
 import { createWriteStream, mkdirSync, type WriteStream } from 'node:fs';
 import { dirname } from 'node:path';
+import type { Readable } from 'node:stream';
 import { redact } from '../core/redact.js';
 
 export interface RunOptions {
   cwd: string;
   env: Record<string, string>;
-  stdin?: string;
+  stdin?: string | Readable;
   timeoutMs?: number;
   signal?: AbortSignal;
   onLine?: (line: string) => void;
@@ -103,7 +104,14 @@ export function runProcess(cmd: string, args: string[], opts: RunOptions): Promi
     child.stderr!.on('data', (d: string) => { if (stderr.length < cap) stderr += d; });
     child.on('close', (code, sig) => finish({ exitCode: code, signal: sig, stdout, stderr, timedOut, aborted }));
     child.stdin!.on('error', () => { /* child may exit before reading stdin */ });
-    child.stdin!.end(opts.stdin ?? '');
+    if (typeof opts.stdin === 'object') {
+      const input = opts.stdin;
+      child.on('close', () => input.destroy());
+      input.on('error', (err) => child.stdin!.destroy(err));
+      input.pipe(child.stdin!);
+    } else {
+      child.stdin!.end(opts.stdin ?? '');
+    }
   });
 }
 

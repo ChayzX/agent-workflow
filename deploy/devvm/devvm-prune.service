@@ -1,0 +1,8 @@
+[Unit]
+Description=Remove expired Chasebot development VM access keys
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/devvm prune
+NoNewPrivileges=yes
+UMask=0077

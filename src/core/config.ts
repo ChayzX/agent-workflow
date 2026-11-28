@@ -45,7 +45,14 @@ export interface Config {
   };
   security: {
     allowedRepos: string[]; sandbox: 'auto' | 'bwrap' | 'none'; agentSandbox?: 'auto' | 'bwrap' | 'none'; agentSandboxRelaxFor?: string[]; gateNetwork: boolean;
+    /** Where quality-gate and release-verification commands run: bubblewrap here ('local') or throwaway VMs ('devvm'). */
+    gateBackend?: 'local' | 'devvm';
     approvalRequiredFor: string[]; protectedPathGlobs: string[];
+  };
+  vm: {
+    command: string | null;          // absolute path to the trusted devvm executable (deploy/devvm/devvm)
+    unavailableRetryMin: number;     // while the VM host is asleep/paused/full, gates wait this long between attempts
+    gate: { cpus: number; ramMib: number; diskGib: number };
   };
   dashboard: { host: string; port: number; tokenHash: string | null; sessionHours: number; trustProxy?: boolean };
   logging: { level: 'debug' | 'info' | 'warn' | 'error'; maxBytes: number; keep: number };
@@ -97,7 +104,9 @@ export function defaultConfig(home = defaultHome()): Config {
       approvalRequiredFor: ['production_deploy', 'destructive_operation', 'protected_infrastructure', 'unrelated_repository',
         'credential_expansion', 'additional_spending', 'public_publication', 'security_policy_change'],
       protectedPathGlobs: ['.github/workflows/**', '**/.env', '**/*.pem', '**/id_rsa*'],
+      gateBackend: 'local',
     },
+    vm: { command: null, unavailableRetryMin: 5, gate: { cpus: 2, ramMib: 2048, diskGib: 12 } },
     dashboard: { host: '127.0.0.1', port: 7420, tokenHash: null, sessionHours: 12 },
     logging: { level: 'info', maxBytes: 10 * 1024 * 1024, keep: 5 },
   };
@@ -144,6 +153,18 @@ export function validateConfig(cfg: Config): void {
   for (const [n, p] of Object.entries(cfg.providers)) {
     if (p.maxConcurrent < 0) errs.push(`providers.${n}.maxConcurrent must be >= 0`);
   }
+  if ('devVmGateCommand' in (cfg.security as Record<string, unknown>))
+    errs.push('security.devVmGateCommand was replaced: set security.gateBackend to "devvm" and vm.command to the devvm path');
+  const gb = cfg.security.gateBackend ?? 'local';
+  if (gb !== 'local' && gb !== 'devvm') errs.push('security.gateBackend must be "local" or "devvm"');
+  if (gb === 'devvm' && !(typeof cfg.vm.command === 'string' && cfg.vm.command.startsWith('/')))
+    errs.push('security.gateBackend "devvm" requires vm.command (absolute path to the devvm executable)');
+  pos(cfg.vm.unavailableRetryMin, 'vm.unavailableRetryMin');
+  // Sizes the devvm CLI and the Windows worker accept for one lease (deploy/devvm/host.py RANGES).
+  const g = cfg.vm.gate;
+  if (!(Number.isInteger(g.cpus) && g.cpus >= 1 && g.cpus <= 4)) errs.push('vm.gate.cpus must be an integer in 1..4');
+  if (!(Number.isInteger(g.ramMib) && g.ramMib >= 1024 && g.ramMib <= 4096)) errs.push('vm.gate.ramMib must be an integer in 1024..4096');
+  if (!(Number.isInteger(g.diskGib) && g.diskGib >= 8 && g.diskGib <= 24)) errs.push('vm.gate.diskGib must be an integer in 8..24');
   if (errs.length) throw new Error('Invalid configuration:\n - ' + errs.join('\n - '));
 }
 

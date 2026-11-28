@@ -15,6 +15,7 @@ import type { Ctx } from './ctx.js';
 import { topLevelTree } from './context.js';
 import { DebateEngine } from './debate.js';
 import { failedGateText, gateEvidence, runGates } from './gates.js';
+import { assertGatesRunnable, GateBackendUnavailableError } from './gate-backend.js';
 import { ACTIONABLE, MessageBus } from './messages.js';
 import { buildAndVerifyRelease } from './release.js';
 import { defaultRoleFor } from './roles.js';
@@ -60,6 +61,8 @@ export class Workflow {
   job(key: string, projectId: string, fn: () => Promise<void>): void {
     if (this.jobs.has(key)) return;
     const p = (async () => fn())().catch((e: Error) => {
+      // Waiting for the VM backend is reported once per outage by holdGates(); the job simply runs again later.
+      if (e instanceof GateBackendUnavailableError) { this.ctx.log.debug('job waiting for gate backend', { key, reason: e.message }); return; }
       this.ctx.events.emit('job.error', `${key}: ${e.message}`, { projectId, level: 'error', data: { stack: e.stack?.slice(0, 2000) } });
       this.ctx.log.error('job failed', { key, error: e.message });
     }).finally(() => { this.jobs.delete(key); this.wake(); });
@@ -484,11 +487,18 @@ export class Workflow {
     }
 
     // Local mode: merge, then verify the merged commit with gates before accepting it.
+    assertGatesRunnable(this.ctx); // do not stage a merge that cannot be verified now
     const staged = await ws.stageMerge(w.branch!);
     if (!staged.ok) { this.toRemediation(p, w, 'conflicts', { conflicts: staged.conflicts }); return; }
     const prevMain = await ws.head();
     const mergeSha = await ws.commitMerge(`Merge ${w.key}: ${w.title}`);
-    const s = await runGates(this.ctx, { projectId: p.id, workItemId: w.id, scope: 'merge', cwd: ws.integration, commit: mergeSha, gates: this.store.settings(p).gates, gitDir: this.ws(p).bare });
+    let s: Awaited<ReturnType<typeof runGates>>;
+    try {
+      s = await runGates(this.ctx, { projectId: p.id, workItemId: w.id, scope: 'merge', cwd: ws.integration, commit: mergeSha, gates: this.store.settings(p).gates, gitDir: this.ws(p).bare });
+    } catch (e) {
+      await ws.gitIn(ws.integration, ['reset', '--hard', prevMain]); // unverified merge is undone; retried later
+      throw e;
+    }
     if (!s.passed) {
       await ws.gitIn(ws.integration, ['reset', '--hard', prevMain]);
       this.store.checkpoint({ projectId: p.id, workItemId: w.id, kind: 'merge_gate_failure', summary: `merge verification failed: ${s.results.filter((r) => r.status !== 'pass').map((r) => r.name).join(', ')}` });
@@ -775,6 +785,7 @@ export class Workflow {
 
   private advanceReleasing(p: ProjectRow): void {
     this.job(`integration:${p.id}`, p.id, async () => {
+      assertGatesRunnable(this.ctx); // the VM backend's hold covers release verification too
       const audit = this.ctx.db.get<{ commit_sha: string }>("SELECT commit_sha FROM audits WHERE project_id=? AND kind='completion' AND status='passed' ORDER BY created_at DESC LIMIT 1", p.id);
       const ws = this.ws(p);
       const head = await ws.head();
