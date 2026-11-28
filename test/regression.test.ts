@@ -657,3 +657,25 @@ test('operator verification #48: provider CLIs symlinked into a hidden home have
   const run = execFileSync(w.cmd, w.args, { encoding: 'utf8', env: { PATH: process.env.PATH! } });
   assert.equal(run.trim(), 'ok', 'the symlinked CLI runs inside the sandbox');
 });
+
+test('PR #63 review B1: a standalone CLI binary directly in the home never re-exposes the home (SSH keys, GitHub token)', async (t) => {
+  const sbx = await import('../src/security/sandbox.js');
+  if (!sbx.findBwrap()) { t.diagnostic('bubblewrap unavailable; skipped'); return; }
+  const home = mkdtempSync(join(tmpdir(), 'orch-b1-home-'));
+  const orchHome = join(home, '.orch');
+  mkdirSync(join(home, '.ssh')); writeFileSync(join(home, '.ssh', 'id_rsa'), 'SSH-PRIVATE\n'); // orchestrator:allow-secret (test fixture)
+  mkdirSync(join(orchHome, 'secrets'), { recursive: true }); writeFileSync(join(orchHome, 'secrets', 'github-token'), 'TOKEN-SECRET\n'); // orchestrator:allow-secret (test fixture)
+  const bin = join(home, 'codex');
+  writeFileSync(bin, `#!/bin/sh\ncat ${join(home, '.ssh', 'id_rsa')} 2>/dev/null; cat ${join(orchHome, 'secrets', 'github-token')} 2>/dev/null; echo ran\n`, { mode: 0o755 });
+  const savedHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => { process.env.HOME = savedHome; rmSync(home, { recursive: true, force: true }); });
+  const cfg = defaultConfig(orchHome); cfg.security.agentSandbox = 'bwrap';
+  const w = sbx.wrapAgentCommand(cfg, { orchHome, provider: 'codex', writable: [], readOnly: [] }, bin, []);
+  const binds = w.args.flatMap((a, i) => (a === '--ro-bind' || a === '--bind' ? [w.args[i + 1]] : []));
+  assert.ok(!binds.includes(home) && !binds.includes(orchHome) && !binds.includes('/home'), `no hidden root re-bound: ${binds.join(' ')}`);
+  assert.ok(binds.includes(bin), 'only the binary file is bound');
+  const out = execFileSync(w.cmd, w.args, { encoding: 'utf8', env: { PATH: process.env.PATH!, HOME: home } });
+  assert.match(out, /ran/, 'the standalone binary still runs');
+  assert.doesNotMatch(out, /SSH-PRIVATE|TOKEN-SECRET/, 'secrets stay hidden');
+});

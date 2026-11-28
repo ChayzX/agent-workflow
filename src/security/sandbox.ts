@@ -93,18 +93,23 @@ export function sandboxMode(cfg: Config): 'bwrap' | 'none' {
 function toolBinds(hidden: string[], cmds: string[]): string[] {
   const under = (p: string) => hidden.some((h) => p === h || p.startsWith(h + '/'));
   const secret = (p: string) => /\.(codex|claude|ssh|gnupg|aws|kube|config\/gh)\b/.test(p);
+  // Never re-expose a hidden root, or any directory that contains one (e.g. $HOME, /home, or a dir holding ORCH_HOME):
+  // a recursive --ro-bind of it would undo the tmpfs hides and reveal ~/.ssh, tokens and the orchestrator's secrets.
+  const exposesHidden = (p: string) => hidden.some((h) => h === p || h.startsWith(p.endsWith('/') ? p : p + '/'));
+  const safeDir = (p: string) => existsSync(p) && under(p) && !secret(p) && !exposesHidden(p);
   const pathDirs = (process.env.PATH ?? '').split(':').filter((p) => p.startsWith('/'));
-  const out = new Set([dirname(dirname(process.execPath)), ...pathDirs].filter((p) => existsSync(p) && under(p) && !secret(p)));
+  const out = new Set([dirname(dirname(process.execPath)), ...pathDirs].filter(safeDir));
   for (const c of cmds) {
     const found = c.startsWith('/') ? c : pathDirs.map((d) => join(d, c)).find((f) => existsSync(f));
     if (!found) continue;
     let real: string;
     try { real = realpathSync(found); } catch { continue; }
     if (!under(real) || secret(real)) continue;
-    // Bind the package that owns the binary (e.g. ~/.local/lib/node_modules/@anthropic-ai/claude-code), else its directory.
-    let root = dirname(real);
-    for (let d = dirname(real), i = 0; i < 5 && under(d) && !hidden.includes(d); d = dirname(d), i++) if (existsSync(join(d, 'package.json'))) { root = d; break; }
-    out.add(root);
+    // Bind the package that owns the binary (e.g. ~/.local/lib/node_modules/@anthropic-ai/claude-code) when there is one
+    // strictly inside a hidden root; otherwise bind only the binary file itself (standalone release binaries).
+    let root: string | null = null;
+    for (let d = dirname(real), i = 0; i < 5 && safeDir(d); d = dirname(d), i++) if (existsSync(join(d, 'package.json'))) { root = d; break; }
+    out.add(root ?? real);
   }
   return [...out];
 }
