@@ -18,6 +18,7 @@ export function makeHarness(behaviour: SimBehaviour, tweak: (c: Config) => void 
   cfg.supervisor.maxConcurrentAgents = 2;
   cfg.supervisor.maxPerProject = 2;
   cfg.security.sandbox = 'none';
+  cfg.security.agentSandbox = 'none'; // simulated adapters spawn nothing; confinement is tested explicitly elsewhere
   cfg.recovery.transientBackoffSec = [1, 1, 1];
   cfg.logging.level = 'error';
   // Simulated adapters registered under the real provider ids to exercise routing logic.

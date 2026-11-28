@@ -103,10 +103,20 @@ export class Supervisor {
 
   async sandboxSelfCheck(): Promise<void> {
     this.claudeState.snapshot();
-    if (agentSandboxMode(this.ctx.cfg) !== 'bwrap') {
-      this.ctx.events.emit('security.sandbox', 'agent sandbox unavailable (no bubblewrap): agents run with a scrubbed environment only', { level: 'warn' });
+    let mode: 'bwrap' | 'none';
+    try { mode = agentSandboxMode(this.ctx.cfg); } catch (e) {
+      // Fail closed: no agent runs until confinement works or the operator explicitly opts out (agentSandbox="none").
+      this.sandboxBlocked = (e as Error).message;
+      this.ctx.events.emit('security.sandbox_unavailable', `agents will not run: ${this.sandboxBlocked}`, { level: 'error' });
+      this.ctx.events.audit('supervisor', 'security.sandbox_unavailable', { detail: { reason: this.sandboxBlocked } });
       return;
     }
+    if (mode === 'none') {
+      this.ctx.events.emit('security.sandbox', 'agent sandbox disabled by configuration (security.agentSandbox="none"): agents run with a scrubbed environment only', { level: 'warn' });
+      this.ctx.events.audit('supervisor', 'security.sandbox_disabled', {});
+      return;
+    }
+    this.ctx.events.emit('security.sandbox_ok', 'agent and gate sandbox self-check passed (bubblewrap with /proc, /tmp and namespaces)', { level: 'info' });
     for (const [id, a] of this.ctx.adapters) {
       if (id !== 'claude' && id !== 'codex') continue;
       const strict = await a.checkAuth().catch(() => ({ ok: false }));
@@ -131,6 +141,8 @@ export class Supervisor {
   }
 
   private sandboxPending = new Set<string>();
+  /** Set when confinement is required but unavailable: no agent task is dispatched (fail closed). */
+  sandboxBlocked: string | null = null;
   /** Apply an operator's approval of a pending sandbox relaxation without restarting. */
   private applySandboxApprovals(): void {
     for (const id of [...this.sandboxPending]) {
@@ -257,6 +269,7 @@ export class Supervisor {
 
   private dispatch(): void {
     if (this.stopping) return;
+    if (this.sandboxBlocked) return; // fail closed (see sandboxSelfCheck); tasks stay queued and resume after a fixed restart
     const max = this.ctx.cfg.supervisor.maxConcurrentAgents;
     for (const t of this.ctx.queue.dispatchable(100)) {
       if (this.running.size >= max) return;
@@ -410,7 +423,7 @@ export class Supervisor {
           if (e.kind === 'rate_limit') ctx.events.emit('provider.rate_limit_event', `${route.provider} rate-limit event`, { projectId: task.project_id, taskId: task.id, level: 'debug', data: e.data });
         },
         maxTurns: ctx.cfg.providers[route.provider]?.maxTurns,
-        osReadOnly: !!task.read_only && agentSandboxMode(ctx.cfg) === 'bwrap',
+        osReadOnly: !!task.read_only && (() => { try { return agentSandboxMode(ctx.cfg) === 'bwrap'; } catch { return false; } })(),
         wrap: (cmd, args, extra) => {
           // The shared repository (including this worktree's admin dir) is read-only for agents and the
           // worktree's `.git` pointer is re-bound read-only: agents edit files, the supervisor owns git.

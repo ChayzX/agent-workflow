@@ -1,7 +1,7 @@
 // Process isolation for untrusted commands (quality gates, release verification) and
 // environment scrubbing for agents. Git worktrees are NOT security boundaries; this layer,
 // the provider CLIs' own sandboxes and the systemd unit hardening provide isolation.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -41,12 +41,15 @@ export function gateEnv(cfg: Config, home: string, source: NodeJS.ProcessEnv = p
 }
 
 let bwrapCache: string | null | undefined;
+/** Tests only: simulate a host where bubblewrap is missing (null) or restore detection (undefined). */
+export function overrideBwrapForTests(v: string | null | undefined): void { bwrapCache = v; }
 export function findBwrap(): string | null {
   if (bwrapCache !== undefined) return bwrapCache;
   try {
     const p = execFileSync('sh', ['-c', 'command -v bwrap'], { encoding: 'utf8' }).trim();
-    // Verify user namespaces actually work here.
-    execFileSync(p, ['--ro-bind', '/', '/', '--dev', '/dev', '--unshare-all', 'true'], { stdio: 'ignore', timeout: 5000 });
+    // Verify it works here with the same mounts and namespaces the real sandboxes use: a fresh /proc fails under
+    // systemd's ProtectKernelTunables/ProtectKernelLogs, and namespaces fail under a user unit's PrivateTmp.
+    execFileSync(p, ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp', '--unshare-all', '--die-with-parent', '--new-session', 'true'], { stdio: 'ignore', timeout: 5000 });
     bwrapCache = p;
   } catch {
     bwrapCache = null;
@@ -69,11 +72,41 @@ export interface SandboxSpec {
   network: boolean;
 }
 
+/** Raised when confinement is required (any mode but an explicit 'none') and bubblewrap cannot provide it. */
+export class SandboxUnavailableError extends Error {
+  constructor(what: 'agents' | 'gates', key: string) {
+    super(`${what === 'agents' ? 'agent' : 'quality-gate'} sandbox unavailable: bubblewrap is missing or cannot create namespaces here `
+      + `(Ubuntu 24.04: AppArmor restricts unprivileged user namespaces; systemd: PrivateTmp in user units or ProtectKernelTunables/ProtectKernelLogs break it). `
+      + `Fix bubblewrap (see docs/troubleshooting.md), or set security.${key}="none" to run ${what} unconfined (not recommended).`);
+    this.name = 'SandboxUnavailableError';
+  }
+}
+
+// Fail closed: 'auto' and 'bwrap' both require a working sandbox. Running unconfined needs an explicit 'none'.
 export function sandboxMode(cfg: Config): 'bwrap' | 'none' {
   if (cfg.security.sandbox === 'none') return 'none';
-  const b = findBwrap();
-  if (cfg.security.sandbox === 'bwrap' && !b) throw new Error('security.sandbox=bwrap but bubblewrap is unavailable (install the "bubblewrap" package)');
-  return b ? 'bwrap' : 'none';
+  if (!findBwrap()) throw new SandboxUnavailableError('gates', 'sandbox');
+  return 'bwrap';
+}
+
+/** Read-only binds for toolchains living under hidden homes, including the real targets of CLI symlinks. */
+function toolBinds(hidden: string[], cmds: string[]): string[] {
+  const under = (p: string) => hidden.some((h) => p === h || p.startsWith(h + '/'));
+  const secret = (p: string) => /\.(codex|claude|ssh|gnupg|aws|kube|config\/gh)\b/.test(p);
+  const pathDirs = (process.env.PATH ?? '').split(':').filter((p) => p.startsWith('/'));
+  const out = new Set([dirname(dirname(process.execPath)), ...pathDirs].filter((p) => existsSync(p) && under(p) && !secret(p)));
+  for (const c of cmds) {
+    const found = c.startsWith('/') ? c : pathDirs.map((d) => join(d, c)).find((f) => existsSync(f));
+    if (!found) continue;
+    let real: string;
+    try { real = realpathSync(found); } catch { continue; }
+    if (!under(real) || secret(real)) continue;
+    // Bind the package that owns the binary (e.g. ~/.local/lib/node_modules/@anthropic-ai/claude-code), else its directory.
+    let root = dirname(real);
+    for (let d = dirname(real), i = 0; i < 5 && under(d) && !hidden.includes(d); d = dirname(d), i++) if (existsSync(join(d, 'package.json'))) { root = d; break; }
+    out.add(root);
+  }
+  return [...out];
 }
 
 export function wrapCommand(cfg: Config, spec: SandboxSpec, command: string): { cmd: string; args: string[]; mode: 'bwrap' | 'none' } {
@@ -86,8 +119,7 @@ export function wrapCommand(cfg: Config, spec: SandboxSpec, command: string): { 
   for (const h of hidden) args.push('--tmpfs', h);
   // Re-expose, read-only, only the toolchain directories gates need (e.g. Node installed under a home via nvm).
   const under = (p: string) => hidden.some((h) => p === h || p.startsWith(h + '/'));
-  const tool = [dirname(dirname(process.execPath)), ...(process.env.PATH ?? '').split(':')].filter((p) => p && p.startsWith('/') && existsSync(p) && under(p) && !/\.(codex|claude|ssh|gnupg|config|aws|kube)\b/.test(p));
-  for (const t of [...new Set(tool)]) args.push('--ro-bind', t, t);
+  for (const t of toolBinds(hidden, ['node', 'npm', 'npx', 'git'])) args.push('--ro-bind', t, t);
   if (spec.network) for (const t of trustPaths()) if (under(t)) args.push('--ro-bind', t, t);
   for (const r of spec.readOnly ?? []) if (existsSync(r)) args.push('--ro-bind', r, r);
   for (const w of spec.writable) args.push('--bind', w, w);
@@ -97,7 +129,12 @@ export function wrapCommand(cfg: Config, spec: SandboxSpec, command: string): { 
 }
 
 export async function runSandboxed(cfg: Config, spec: SandboxSpec, command: string, env: Record<string, string>, timeoutMs: number): Promise<RunResult & { sandbox: string }> {
-  const w = wrapCommand(cfg, spec, command);
+  let w: ReturnType<typeof wrapCommand>;
+  try { w = wrapCommand(cfg, spec, command); } catch (e) {
+    // Fail closed: the untrusted command never runs unconfined; the gate is recorded as an error with the reason.
+    if (e instanceof SandboxUnavailableError) return { exitCode: null, signal: null, stdout: '', stderr: '', timedOut: false, aborted: false, spawnError: e.message, durationMs: 0, sandbox: 'unavailable' };
+    throw e;
+  }
   const r = await runProcess(w.cmd, w.args, { cwd: spec.cwd, env, timeoutMs, maxCaptureBytes: 2 * 1024 * 1024 });
   return { ...r, sandbox: w.mode };
 }
@@ -122,11 +159,9 @@ export function relaxAgentSandbox(provider: string, on = true): void { if (on) r
 export function agentSandboxRelaxed(provider: string): boolean { return relaxedProviders.has(provider); }
 
 export function agentSandboxMode(cfg: Config): 'bwrap' | 'none' {
-  const m = cfg.security.agentSandbox ?? 'auto';
-  if (m === 'none') return 'none';
-  const b = findBwrap();
-  if (m === 'bwrap' && !b) throw new Error('security.agentSandbox=bwrap but bubblewrap is unavailable');
-  return b ? 'bwrap' : 'none';
+  if ((cfg.security.agentSandbox ?? 'auto') === 'none') return 'none';
+  if (!findBwrap()) throw new SandboxUnavailableError('agents', 'agentSandbox');
+  return 'bwrap';
 }
 
 /**
@@ -141,9 +176,8 @@ export function wrapAgentCommand(cfg: Config, spec: AgentSandboxSpec, cmd: strin
   const hidden = [...new Set([...(relaxedProviders.has(spec.provider) ? [] : ['/root', '/home']), home, spec.orchHome])].filter((h) => existsSync(h));
   for (const h of hidden) a.push('--tmpfs', h);
   const under = (p: string) => hidden.some((h) => p === h || p.startsWith(h + '/'));
-  // Toolchains (e.g. nvm-installed node/claude/codex) read-only.
-  const tool = [dirname(dirname(process.execPath)), ...(process.env.PATH ?? '').split(':')].filter((p) => p && p.startsWith('/') && existsSync(p) && under(p) && !/\.(codex|claude|ssh|gnupg|aws|kube|config\/gh)\b/.test(p));
-  for (const t of [...new Set(tool)]) a.push('--ro-bind', t, t);
+  // Toolchains (e.g. nvm-installed node, or provider CLIs whose PATH symlinks point into a hidden ~/.local/lib) read-only.
+  for (const t of toolBinds(hidden, [cmd, 'node', 'git'])) a.push('--ro-bind', t, t);
   for (const t of trustPaths()) if (under(t)) a.push('--ro-bind', t, t);
   // Only the running provider's own session/config directories are writable (they hold its login); its
   // settings/config/hook files are re-bound read-only so an agent cannot plant commands the supervisor's own

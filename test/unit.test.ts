@@ -299,3 +299,14 @@ test('a killed provider run reports the signal, not the opaque event stream', as
   assert.doesNotMatch(r.failure!.message, /FllKi8a/);
   rmSync(d, { recursive: true, force: true });
 });
+
+test('systemd units keep settings that break bubblewrap out (operator verification #49/#53)', () => {
+  const directives = (f: string) => readFileSync(join(process.cwd(), 'deploy', 'systemd', f), 'utf8').split('\n').filter((l) => !l.trim().startsWith('#')).join('\n');
+  const user = directives('orchestrator-user.service');
+  const sys = directives('orchestrator.service');
+  assert.doesNotMatch(user, /^PrivateTmp=/m, 'PrivateTmp in a user unit prevents bubblewrap namespaces');
+  assert.doesNotMatch(sys, /^ProtectKernelTunables=/m, 'breaks the /proc mount of every sandbox');
+  assert.doesNotMatch(sys, /^ProtectKernelLogs=/m, 'breaks the /proc mount of every sandbox');
+  assert.match(sys, /^NoNewPrivileges=yes$/m);
+  assert.match(sys, /^ProtectSystem=strict$/m);
+});

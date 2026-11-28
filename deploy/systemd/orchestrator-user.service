@@ -18,7 +18,8 @@ TimeoutStopSec=90
 # Kill the whole control group (including any provider CLI processes) on stop/crash.
 KillMode=control-group
 NoNewPrivileges=yes
-PrivateTmp=yes
+# No PrivateTmp here: in a *user* unit it makes systemd create a user namespace, and bubblewrap then cannot
+# create its own ("No permissions to create new namespace"). Agents and gates get a private /tmp from bubblewrap.
 UMask=0077
 LimitNOFILE=8192
 MemoryMax=4G

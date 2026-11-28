@@ -611,3 +611,49 @@ test('operator verification #31: rejected pushes never retry in a tight loop (sc
     assert.equal(wf.store.workItemByKey(p0.id, 'W-003')!.status, 'blocked', 'blocked after 5 consecutive failures');
   } finally { h.cleanup(); }
 });
+
+test('operator verification #49/#53: without a working sandbox, gates and agents fail closed unless explicitly opted out', async (t) => {
+  const sbx = await import('../src/security/sandbox.js');
+  const real = sbx.findBwrap();
+  sbx.overrideBwrapForTests(null);
+  t.after(() => sbx.overrideBwrapForTests(real ?? undefined));
+  const cfg = defaultConfig(mkdtempSync(join(tmpdir(), 'orch-fc-')));
+  // Gates: the untrusted command never runs unconfined; the gate records an error with the reason.
+  cfg.security.sandbox = 'auto';
+  const marker = join(cfg.home, 'ran');
+  const r = await sbx.runSandboxed(cfg, { cwd: cfg.home, writable: [cfg.home], hide: [], network: false }, `touch ${marker}`, { PATH: process.env.PATH! }, 5000);
+  assert.match(r.spawnError ?? '', /sandbox unavailable/);
+  assert.equal(existsSync(marker), false, 'command did not run');
+  cfg.security.sandbox = 'none';
+  const r2 = await sbx.runSandboxed(cfg, { cwd: cfg.home, writable: [cfg.home], hide: [], network: false }, `touch ${marker}`, { PATH: process.env.PATH! }, 5000);
+  assert.equal(r2.exitCode, 0); assert.equal(existsSync(marker), true, 'explicit opt-out runs it');
+  // Agents: the supervisor dispatches nothing and records why.
+  const h = makeHarness(demoBehaviour(), (c) => { c.security.agentSandbox = 'auto'; });
+  try {
+    await h.sup.sandboxSelfCheck();
+    assert.match(h.sup.sandboxBlocked ?? '', /agent sandbox unavailable/);
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    for (let i = 0; i < 30; i++) { await h.sup.tick(); h.clock.advance(1000); }
+    assert.equal(h.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE project_id=? AND status IN ('running','succeeded','failed','dead')", p0.id)!.n, 0, 'no agent task ran');
+    assert.ok(h.ctx.db.get("SELECT 1 FROM audit_log WHERE action='security.sandbox_unavailable'"));
+  } finally { await h.sup.workflow.drainJobs(); h.cleanup(); }
+});
+
+test('operator verification #48: provider CLIs symlinked into a hidden home have their real package bound read-only', async (t) => {
+  const sbx = await import('../src/security/sandbox.js');
+  if (!sbx.findBwrap()) { t.diagnostic('bubblewrap unavailable; skipped'); return; }
+  const orchHome = mkdtempSync(join(tmpdir(), 'orch-sym-home-'));
+  const pkg = join(orchHome, 'lib', 'node_modules', '@x', 'fakecli');
+  mkdirSync(join(pkg, 'bin'), { recursive: true }); mkdirSync(join(orchHome, 'bin'));
+  writeFileSync(join(pkg, 'package.json'), '{}'); writeFileSync(join(pkg, 'bin', 'cli.js'), '#!/bin/sh\necho ok\n', { mode: 0o755 });
+  symlinkSync(join(pkg, 'bin', 'cli.js'), join(orchHome, 'bin', 'fakecli'));
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${join(orchHome, 'bin')}:${savedPath}`;
+  t.after(() => { process.env.PATH = savedPath; rmSync(orchHome, { recursive: true, force: true }); });
+  const cfg = defaultConfig(join(orchHome, 'h')); cfg.security.agentSandbox = 'bwrap';
+  const w = sbx.wrapAgentCommand(cfg, { orchHome, provider: 'codex', writable: [], readOnly: [] }, 'fakecli', []);
+  const binds = w.args.flatMap((a, i) => (a === '--ro-bind' ? [w.args[i + 1]] : []));
+  assert.ok(binds.includes(pkg), `package root bound: ${binds.join(' ')}`);
+  const run = execFileSync(w.cmd, w.args, { encoding: 'utf8', env: { PATH: process.env.PATH! } });
+  assert.equal(run.trim(), 'ok', 'the symlinked CLI runs inside the sandbox');
+});
