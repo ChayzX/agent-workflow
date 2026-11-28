@@ -34,7 +34,8 @@ export function scanText(path: string, text: string): SecretHit[] {
   return hits;
 }
 
-export function scanTree(root: string, opts: { includeDeps?: boolean } = {}): SecretHit[] {
+/** `exhaustive`: scan large and binary files too (used for anything exported off this host); unreadably large files are hits. */
+export function scanTree(root: string, opts: { includeDeps?: boolean; exhaustive?: boolean } = {}): SecretHit[] {
   const hits: SecretHit[] = [];
   const walk = (dir: string) => {
     for (const name of readdirSync(dir)) {
@@ -50,6 +51,12 @@ export function scanTree(root: string, opts: { includeDeps?: boolean } = {}): Se
       }
       if (st.isDirectory()) { walk(p); continue; }
       if (isForbiddenFile(rel)) { hits.push({ path: rel, line: 0, rule: 'forbidden-file', excerpt: 'credential-bearing file type' }); continue; }
+      if (opts.exhaustive) {
+        if (st.size > 512 * 1024 * 1024) { hits.push({ path: rel, line: 0, rule: 'unscannable-size', excerpt: 'file too large to scan before export' }); continue; }
+        const buf = readFileSync(p);
+        hits.push(...scanText(rel, buf.includes(0) ? buf.toString('latin1') : buf.toString('utf8')));
+        continue;
+      }
       if (st.size > 2 * 1024 * 1024) continue;
       const buf = readFileSync(p);
       if (buf.includes(0)) continue; // binary

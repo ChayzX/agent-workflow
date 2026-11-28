@@ -160,6 +160,11 @@ export function validateConfig(cfg: Config): void {
   if (gb === 'devvm' && !(typeof cfg.vm.command === 'string' && cfg.vm.command.startsWith('/')))
     errs.push('security.gateBackend "devvm" requires vm.command (absolute path to the devvm executable)');
   pos(cfg.vm.unavailableRetryMin, 'vm.unavailableRetryMin');
+  // Sizes the devvm CLI and the Windows worker accept for one lease (deploy/devvm/host.py RANGES).
+  const g = cfg.vm.gate;
+  if (!(Number.isInteger(g.cpus) && g.cpus >= 1 && g.cpus <= 4)) errs.push('vm.gate.cpus must be an integer in 1..4');
+  if (!(Number.isInteger(g.ramMib) && g.ramMib >= 1024 && g.ramMib <= 4096)) errs.push('vm.gate.ramMib must be an integer in 1024..4096');
+  if (!(Number.isInteger(g.diskGib) && g.diskGib >= 8 && g.diskGib <= 24)) errs.push('vm.gate.diskGib must be an integer in 8..24');
   if (errs.length) throw new Error('Invalid configuration:\n - ' + errs.join('\n - '));
 }
 

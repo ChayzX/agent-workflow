@@ -11,8 +11,8 @@ import { newId, sha256, slugify } from '../core/ids.js';
 import type { ProjectRow } from '../core/types.js';
 import type { Workspace } from '../git/git.js';
 import { gateEnv, runSandboxed } from '../security/sandbox.js';
-import { gateBackendKind } from './gate-backend.js';
-import { runVmCommand } from '../vm/devvm.js';
+import { gateBackendKind, GateBackendUnavailableError, holdGates } from './gate-backend.js';
+import { prepareVmSource, runVmCommand } from '../vm/devvm.js';
 import { isForbiddenFile, scanTree } from '../security/secrets.js';
 import { collectDir, extractZip, writeZip } from '../util/zip.js';
 import type { Ctx } from './ctx.js';
@@ -134,15 +134,25 @@ export async function buildAndVerifyRelease(ctx: Ctx, store: Store, project: Pro
     const home = join(work, 'home');
     mkdirSync(home);
     const vm = gateBackendKind(ctx.cfg) === 'devvm';
-    for (const cmd of m2.verify_commands) {
-      // With the VM backend, the clean-room install runs in a fresh VM too (never on this host).
-      const r = vm ? await runVmCommand(ctx.cfg.vm.command!, { kind: 'dir', dir: root }, cmd, true, 30 * 60_000, ctx.cfg.vm.gate)
+    // With the VM backend the clean-room install runs in a fresh VM (never on this host), and only a package that
+    // passed every credential check is exported.
+    const prepared = vm && !problems.length ? await prepareVmSource({ kind: 'dir', dir: root }) : null;
+    if (prepared?.hits.length) problems.push(`secret scan of the exported package found credentials: ${prepared.hits.slice(0, 5).map((h) => `${h.path}:${h.line} ${h.rule}`).join('; ')}`);
+    try {
+    for (const cmd of vm && (problems.length || !prepared) ? [] : m2.verify_commands) {
+      const r = prepared ? await runVmCommand(ctx.cfg.vm.command!, prepared, cmd, true, 30 * 60_000, ctx.cfg.vm.gate)
         : await runSandboxed(ctx.cfg, { cwd: root, writable: [root, home], hide: [ctx.paths.home], network: true }, cmd,
         { ...gateEnv({ ...ctx.cfg, security: { ...ctx.cfg.security, gateNetwork: true } }, home) }, 30 * 60_000);
-      if (vm && 'unavailable' in r && r.unavailable) { problems.push(`clean-environment verification could not run: the VM backend is unavailable (${(r.spawnError ?? r.stderr).trim().slice(-300)}); retry the release when the gaming PC is available`); break; }
+      if (prepared && 'unavailable' in r && r.unavailable) {
+        // An outage is not a verification result: wait and retry the whole release later.
+        const reason = `release verification: ${(r.spawnError ?? r.stderr).trim().split('\n').slice(-2).join(' ') || `devvm exited ${r.exitCode}`}`;
+        holdGates(ctx, reason);
+        throw new GateBackendUnavailableError(reason);
+      }
       log.push(`$ ${cmd} → exit ${r.exitCode}${r.timedOut ? ' (timeout)' : ''}\n${excerpt(r.stdout + r.stderr, 3000)}`);
       if (r.exitCode !== 0) { problems.push(`clean-environment verification failed: \`${cmd}\` exited ${r.exitCode}`); break; }
     }
+    } finally { prepared?.dispose(); }
     if (!m2.verify_commands.length) problems.push('no verification commands declared; installation reproducibility cannot be verified');
 
     const ok = problems.length === 0;
@@ -153,6 +163,10 @@ export async function buildAndVerifyRelease(ctx: Ctx, store: Store, project: Pro
     ctx.events.audit('supervisor', 'release.built', { projectId: project.id, target: releaseId, detail: { version, commit, sha256: digest, ok } });
     return { ok, releaseId, zipPath, sha256: digest, problems, verificationLog: vlog };
   } catch (e) {
+    if (e instanceof GateBackendUnavailableError) {
+      ctx.db.run("UPDATE releases SET status='waiting', verification_log=?, updated_at=? WHERE id=?", `waiting for the VM backend: ${e.message}`, ctx.clock.now(), releaseId);
+      throw e;
+    }
     problems.push(`release build error: ${(e as Error).message}`);
     ctx.db.run("UPDATE releases SET status='failed', verification_log=?, updated_at=? WHERE id=?", problems.join('\n'), ctx.clock.now(), releaseId);
     return { ok: false, releaseId, problems, verificationLog: log.join('\n') };

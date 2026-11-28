@@ -785,6 +785,7 @@ export class Workflow {
 
   private advanceReleasing(p: ProjectRow): void {
     this.job(`integration:${p.id}`, p.id, async () => {
+      assertGatesRunnable(this.ctx); // the VM backend's hold covers release verification too
       const audit = this.ctx.db.get<{ commit_sha: string }>("SELECT commit_sha FROM audits WHERE project_id=? AND kind='completion' AND status='passed' ORDER BY created_at DESC LIMIT 1", p.id);
       const ws = this.ws(p);
       const head = await ws.head();

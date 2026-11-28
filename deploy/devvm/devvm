@@ -230,29 +230,42 @@ def prune():
     for folder in LEASES.iterdir():
         if not folder.is_dir() or not LEASE_ID.fullmatch(folder.name):
             continue
-        with (folder / "lock").open("a") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                continue
-            receipt = folder / "lease.json"
-            pending = folder / "request.json"
-            if receipt.exists():
-                expired = json.loads(receipt.read_text())["expires_at"] <= time.time()
-            elif pending.exists():
-                expired = pending.stat().st_mtime + 900 + 60 * json.loads(pending.read_text())["ttl_minutes"] <= time.time()
-            else:
-                expired = True
-            if expired:
-                clear_local(folder.name)
-                # Remove the folder once only the lock is left. Unlink while holding the lock; `locked` notices.
-                if {item.name for item in folder.iterdir()} <= {"lock"}:
-                    (folder / "lock").unlink(missing_ok=True)
-                    folder.rmdir()
+        try:
+            prune_one(folder)
+        except OSError as exc:
+            # A concurrent provision or prune touched this folder; leave it for the next run.
+            print(f"devvm: prune skipped {folder.name}: {exc}", file=sys.stderr)
 
 
-def gate(command, cpus, ram_mib, disk_gib, ttl_minutes, network):
-    """Read a trusted orchestrator's git archive on stdin and execute one command in a fresh VM."""
+def prune_one(folder):
+    with (folder / "lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        receipt = folder / "lease.json"
+        pending = folder / "request.json"
+        if receipt.exists():
+            expired = json.loads(receipt.read_text())["expires_at"] <= time.time()
+        elif pending.exists():
+            expired = pending.stat().st_mtime + 900 + 60 * json.loads(pending.read_text())["ttl_minutes"] <= time.time()
+        else:
+            expired = True
+        if expired:
+            clear_local(folder.name)
+            # Remove the folder once only the lock is left. Unlink while holding the lock; `locked` notices.
+            if {item.name for item in folder.iterdir()} <= {"lock"}:
+                (folder / "lock").unlink(missing_ok=True)
+                folder.rmdir()
+
+
+def gate(command, cpus, ram_mib, disk_gib, ttl_minutes, network, status_file=None):
+    """Read a trusted orchestrator's archive on stdin and execute one command in a fresh VM.
+
+    The command's exit status is read back out-of-band (a status file in the guest), so a command that itself
+    exits 75 or 255 is reported as its own result. Exit 75 from this function means the command did not run to
+    completion in a VM. With --status-file, the status is also written there and the exit code is 0 or 75.
+    """
     value = uuid.uuid4().hex
     try:
         try:
@@ -261,16 +274,26 @@ def gate(command, cpus, ram_mib, disk_gib, ttl_minutes, network):
             print(f"devvm: unavailable: {exc}", file=sys.stderr, flush=True)
             return EX_UNAVAILABLE
         namespace = "" if network else "unshare --net --pid --fork --mount-proc "
+        directory = f"/tmp/agent-gate.{value}"
         script = (
-            "set -eu; directory=$(mktemp -d /tmp/agent-gate.XXXXXXXX); "
+            f"set -eu; directory={directory}; mkdir -m 700 \"$directory\"; "
             'tar --no-same-owner --no-same-permissions -xf - -C "$directory"; '
-            'sudo chown -hR devgate:devgate "$directory"; '
-            f"exec sudo {namespace}runuser -u devgate -- env -C \"$directory\" CI=true /bin/bash -c " + shlex.quote(command)
+            'sudo chown -hR devgate:devgate "$directory"; set +e; '
+            f"sudo {namespace}runuser -u devgate -- env -C \"$directory\" CI=true /bin/bash -c " + shlex.quote(command) + "; "
+            f'printf "%s\\n" "$?" > {directory}.rc; exit 0'
         )
-        status = subprocess.run(guest_ssh(lease, quiet=True) + ["dev@localhost", script], check=False).returncode
-        if status == 255:
-            print("devvm: unavailable: guest SSH connection failed or was lost", file=sys.stderr, flush=True)
-        return status
+        transport = subprocess.run(guest_ssh(lease, quiet=True) + ["dev@localhost", script], check=False).returncode
+        read = subprocess.run(guest_ssh(lease, quiet=True) + ["dev@localhost", f"cat {directory}.rc"], stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, check=False, timeout=120)
+        status = read.stdout.strip()
+        if read.returncode or not status.isdigit():
+            print(f"devvm: unavailable: the command did not report a status (transport exit {transport}); "
+                  "the guest SSH connection failed or was lost", file=sys.stderr, flush=True)
+            return EX_UNAVAILABLE
+        if status_file:
+            Path(status_file).write_text(status + "\n")
+            return 0
+        return int(status)
     finally:
         try:
             # A running or partially created lease remains subject to the Windows reaper.
@@ -297,6 +320,7 @@ def main():
     size_options(allocation)
     remote_gate = commands.add_parser("gate")
     remote_gate.add_argument("--network", action="store_true")
+    remote_gate.add_argument("--status-file", type=Path)
     size_options(remote_gate, ttl=30)
     remote_gate.add_argument("command")
     for operation in ("status", "destroy"):
@@ -310,7 +334,7 @@ def main():
     args = parser.parse_args()
     operation = args.operation
     if operation == "gate":
-        return gate(args.command, args.cpus, args.ram_mib, args.disk_gib, args.ttl_minutes, args.network)
+        return gate(args.command, args.cpus, args.ram_mib, args.disk_gib, args.ttl_minutes, args.network, args.status_file)
     if operation == "ssh":
         command = args.command[1:] if args.command[:1] == ["--"] else args.command
         remote = command if len(command) <= 1 else [shlex.join(command)]

@@ -12,11 +12,11 @@ export class GateBackendUnavailableError extends Error {
   constructor(message: string) { super(message); this.name = 'GateBackendUnavailableError'; }
 }
 
-interface State { checked: boolean; blocked: string | null; holdUntil: number; holdReason: string | null }
+interface State { checked: boolean; blocked: string | null; recheckAt: number; holdUntil: number; holdReason: string | null }
 const states = new WeakMap<Config, State>();
 function state(cfg: Config): State {
   let s = states.get(cfg);
-  if (!s) { s = { checked: false, blocked: null, holdUntil: 0, holdReason: null }; states.set(cfg, s); }
+  if (!s) { s = { checked: false, blocked: null, recheckAt: 0, holdUntil: 0, holdReason: null }; states.set(cfg, s); }
   return s;
 }
 
@@ -33,6 +33,7 @@ export async function gateBackendSelfCheck(ctx: Ctx): Promise<void> {
   if (kind === 'local') return;
   const problem = checkDevVmExecutable(ctx.cfg.vm.command);
   s.blocked = problem ? `VM gate backend unusable: ${problem}. Gates will not run (they never fall back to this host).` : null;
+  s.recheckAt = ctx.clock.now() + ctx.cfg.vm.unavailableRetryMin * 60_000;
   if (s.blocked) {
     ctx.events.emit('security.vm_backend_unavailable', s.blocked, { level: 'error' });
     ctx.events.audit('supervisor', 'security.vm_backend_unavailable', { detail: { reason: problem } });
@@ -41,7 +42,14 @@ export async function gateBackendSelfCheck(ctx: Ctx): Promise<void> {
   const r = await devvm(ctx.cfg.vm.command!, ['reachable'], { timeoutMs: 20_000 });
   let awake: boolean | null = null;
   try { awake = r.exitCode === 0 ? !!JSON.parse(r.stdout).reachable : null; } catch { awake = null; }
-  const where = awake === true ? 'host reachable' : awake === false ? 'host asleep or unreachable; gates will wake it on demand' : `reachability unknown (${(r.stderr || r.spawnError || '').trim().slice(0, 200)})`;
+  if (awake === null) {
+    // devvm itself cannot work (e.g. its config.json is missing): gates will wait; say so plainly at start.
+    const why = `devvm cannot query the VM host: ${(r.stderr || r.spawnError || `exit ${r.exitCode}`).trim().slice(0, 300)}`;
+    ctx.events.emit('security.vm_backend_unavailable', `${why}. Gates will wait until this is fixed (they never run on this host).`, { level: 'error' });
+    ctx.events.audit('supervisor', 'security.vm_backend_unavailable', { detail: { reason: why } });
+    return;
+  }
+  const where = awake ? 'host reachable' : 'host asleep or unreachable; gates will wake it on demand';
   ctx.events.emit('security.vm_backend_ok', `quality gates run in throwaway VMs via ${ctx.cfg.vm.command} (${where})`, { level: 'info' });
 }
 
@@ -53,7 +61,15 @@ export function assertGatesRunnable(ctx: Ctx): void {
     // Outside a supervisor (CLI, tests): still verify the executable before exporting any source.
     const problem = checkDevVmExecutable(ctx.cfg.vm.command);
     s.blocked = problem ? `VM gate backend unusable: ${problem}` : null;
+    s.recheckAt = ctx.clock.now() + ctx.cfg.vm.unavailableRetryMin * 60_000;
     s.checked = true;
+  }
+  if (s.blocked && ctx.clock.now() >= s.recheckAt) {
+    // The operator may have fixed the executable: re-check once per retry interval, no restart needed.
+    const problem = checkDevVmExecutable(ctx.cfg.vm.command);
+    s.recheckAt = ctx.clock.now() + ctx.cfg.vm.unavailableRetryMin * 60_000;
+    if (!problem) { s.blocked = null; ctx.events.emit('security.vm_backend_ok', `VM gate backend usable again: ${ctx.cfg.vm.command}`, { level: 'info' }); }
+    else s.blocked = `VM gate backend unusable: ${problem}. Gates will not run (they never fall back to this host).`;
   }
   if (s.blocked) throw new GateBackendUnavailableError(s.blocked);
   if (ctx.clock.now() < s.holdUntil) throw new GateBackendUnavailableError(`VM backend unavailable; retrying after ${new Date(s.holdUntil).toISOString()}: ${s.holdReason}`);

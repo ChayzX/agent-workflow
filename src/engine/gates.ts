@@ -10,7 +10,7 @@ import { gateEnv, runSandboxed } from '../security/sandbox.js';
 import { scanTree } from '../security/secrets.js';
 import type { Ctx } from './ctx.js';
 import { assertGatesRunnable, gateBackendKind, GateBackendUnavailableError, gatesRanOk, holdGates } from './gate-backend.js';
-import { runVmCommand } from '../vm/devvm.js';
+import { prepareVmSource, runVmCommand } from '../vm/devvm.js';
 
 export interface GateResult { name: string; required: boolean; status: 'pass' | 'fail' | 'error'; exitCode: number | null; durationMs: number; excerpt: string; logPath: string; sandbox: string }
 export interface GateSummary { passed: boolean; results: GateResult[]; commit: string }
@@ -34,16 +34,15 @@ export async function runGates(ctx: Ctx, opts: { projectId: string; workItemId: 
   // Throws (nothing recorded) when the configured backend cannot run gates now; callers retry later.
   assertGatesRunnable(ctx);
   const vm = gateBackendKind(ctx.cfg) === 'devvm';
-  // Never export credentials to a VM: the built-in scan runs first and blocks the export.
-  const blockExport = vm && scanTree(opts.cwd).length > 0;
+  // Never export credentials to a VM: the exact archive is built once and scanned exhaustively before any export.
+  const prepared = vm ? await prepareVmSource({ kind: 'git', cwd: opts.cwd, gitDir: opts.gitDir, commit: opts.commit }) : null;
+  const blockExport = !!prepared?.hits.length;
+  try {
 
   for (const g of opts.gates) {
     const started = ctx.clock.now();
     const timeoutMs = (g.timeout_sec ?? 900) * 1000;
-    const r = blockExport ? {
-      spawnError: 'Built-in secret scan found credentials. Source export to the VM was blocked.',
-      stdout: '', stderr: '', timedOut: false, exitCode: null, durationMs: 0, sandbox: 'devvm',
-    } : vm ? await runVmCommand(ctx.cfg.vm.command!, { kind: 'git', cwd: opts.cwd, gitDir: opts.gitDir, commit: opts.commit }, g.command, ctx.cfg.security.gateNetwork, timeoutMs, ctx.cfg.vm.gate)
+    const r = prepared ? await runVmCommand(ctx.cfg.vm.command!, prepared, g.command, ctx.cfg.security.gateNetwork, timeoutMs, ctx.cfg.vm.gate)
       : await runSandboxed(
       ctx.cfg,
       { cwd: opts.cwd, writable: [opts.cwd, home], readOnly: opts.gitDir ? [opts.gitDir] : [], hide: [ctx.paths.home], network: ctx.cfg.security.gateNetwork, readOnlyLast: [join(opts.cwd, '.git')] },
@@ -69,10 +68,11 @@ export async function runGates(ctx: Ctx, opts: { projectId: string; workItemId: 
       results.at(-1)!.excerpt, logPath, started,
     );
   }
+  } finally { prepared?.dispose(); }
 
-  // Built-in, always-required secret scan of the tree.
+  // Built-in, always-required secret scan of the tree (with the VM backend: of exactly what was exported).
   const t0 = Date.now();
-  const hits = scanTree(opts.cwd);
+  const hits = prepared ? prepared.hits : scanTree(opts.cwd);
   const secretOut = hits.length ? hits.map((h) => `${h.path}:${h.line} ${h.rule} ${h.excerpt}`).join('\n') : 'no secrets detected';
   const secretLog = join(logDir, `${BUILTIN_SECRET_GATE}.log`);
   writeFileSync(secretLog, secretOut, { mode: 0o600 });

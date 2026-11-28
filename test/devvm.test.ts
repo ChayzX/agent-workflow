@@ -244,3 +244,95 @@ test('devvm e2e: with the VM host asleep, items wait in gating (no remediation, 
     assert.ok(fake.gates().length >= sandboxes.length, 'every recorded gate ran in the (fake) VM');
   } finally { h.cleanup(); }
 });
+
+test('review#65 F3: a gate command that itself exits 75 or 255 is a recorded failure, not an outage', async () => {
+  const fake = installFake();
+  const { dir, commit } = repoWith({ 'a.txt': 'a' });
+  const h = makeHarness(noAgents, (c) => { c.security.gateBackend = 'devvm'; c.vm.command = fake.bin; });
+  try {
+    const s = await runGates(h.ctx, { projectId: 'p1', workItemId: null, scope: 'task', cwd: dir, commit, gates: [
+      { name: 'e75', command: 'exit 75', required: true }, { name: 'e255', command: 'exit 255', required: true }] as never });
+    const by = Object.fromEntries(s.results.map((r) => [r.name, r]));
+    assert.equal(by.e75!.status, 'fail'); assert.equal(by.e75!.exitCode, 75);
+    assert.equal(by.e255!.status, 'fail'); assert.equal(by.e255!.exitCode, 255);
+    assert.equal(gateBackendStatus(h.ctx.cfg).waitingUntil, null, 'no hold');
+  } finally { h.cleanup(); }
+});
+
+test('review#65 F4: credentials anywhere in the exported commit (dist/, node_modules/, binaries) block the export', async () => {
+  const fake = installFake();
+  const { dir, commit } = repoWith({ 'src.js': 'ok', 'dist/config.js': 'const k = "AKIAABCDEFGHIJKLMNOP";\n', 'blob.bin': `\0\0AKIAQRSTUVWXYZABCDEF\0` });
+  const h = makeHarness(noAgents, (c) => { c.security.gateBackend = 'devvm'; c.vm.command = fake.bin; });
+  try {
+    const s = await runGates(h.ctx, { projectId: 'p1', workItemId: null, scope: 'task', cwd: dir, commit, gates: [{ name: 't', command: 'true', required: true }] as never });
+    assert.equal(s.passed, false);
+    const scan = s.results.find((r) => r.name === 'secret-scan')!;
+    assert.equal(scan.status, 'fail');
+    assert.match(scan.excerpt, /dist\/config\.js/);
+    assert.match(scan.excerpt, /blob\.bin/);
+    assert.equal(fake.gates().length, 0, 'nothing was exported');
+  } finally { h.cleanup(); }
+});
+
+test('review#65 F5/F6: a symlink in a writable directory is not trusted; out-of-range gate sizes are rejected', () => {
+  const fake = installFake();
+  const open = tmp('orch-open-');
+  chmodSync(open, 0o777); // writable by others, not sticky: anyone could swap the link
+  const link = join(open, 'devvm');
+  execFileSync('ln', ['-s', fake.bin, link]);
+  assert.match(checkDevVmExecutable(link)!, /writable by group or others/);
+  const cfg = defaultConfig(tmp());
+  cfg.vm.gate.cpus = 8;
+  assert.throws(() => validateConfig(cfg), /vm\.gate\.cpus/);
+});
+
+test('review#65 F7: a blocked backend is re-checked after the retry interval (no restart needed)', async () => {
+  const fake = installFake();
+  const { dir, commit } = repoWith({ 'a.txt': 'a' });
+  chmodSync(fake.bin, 0o777);
+  const h = makeHarness(noAgents, (c) => { c.security.gateBackend = 'devvm'; c.vm.command = fake.bin; c.vm.unavailableRetryMin = 1; });
+  const gates = [{ name: 't', command: 'true', required: true }] as never;
+  try {
+    await assert.rejects(runGates(h.ctx, { projectId: 'p1', workItemId: null, scope: 'task', cwd: dir, commit, gates }), /writable/);
+    chmodSync(fake.bin, 0o755);
+    h.clock.advance(61_000);
+    assert.equal((await runGates(h.ctx, { projectId: 'p1', workItemId: null, scope: 'task', cwd: dir, commit, gates })).passed, true);
+  } finally { h.cleanup(); }
+});
+
+test('review#65 F1: a VM outage during release verification waits; no defect, no reopened development', async () => {
+  const { DEMO_GOAL, demoBehaviour } = await import('./support/scenario.js');
+  const { drive, newDemoProject } = await import('./support/harness.js');
+  const fake = installFake();
+  const h = makeHarness(demoBehaviour({ calls: {}, log: [] }), (c) => { c.security.gateBackend = 'devvm'; c.vm.command = fake.bin; c.vm.unavailableRetryMin = 1; });
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    // Run until the completion audit passed, then take the VM host away before the release verifies.
+    await drive(h, () => !!h.ctx.db.get("SELECT 1 FROM audits WHERE project_id=? AND kind='completion' AND status='passed'", p0.id), p0.id, { maxTicks: 800 });
+    fake.setMode({ mode: 'asleep' });
+    for (let i = 0; i < 20; i++) { await h.sup.tick(); await h.sup.settle(); h.clock.advance(5_000); }
+    const p = h.ctx.db.get<{ status: string }>('SELECT status FROM projects WHERE id=?', p0.id)!;
+    assert.ok(['releasing', 'auditing'].includes(p.status), `project stays in its phase (got ${p.status})`);
+    assert.equal(h.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM work_items WHERE project_id=? AND title LIKE 'Release package verification failed%'", p0.id)!.n, 0);
+    fake.setMode({ mode: 'ok' });
+    const done = await drive(h, (x) => ['completed', 'blocked', 'failed'].includes(x.status), p0.id, { maxTicks: 400 });
+    assert.equal(done.status, 'completed');
+    assert.equal(h.ctx.db.get<{ status: string }>('SELECT status FROM releases WHERE project_id=? ORDER BY created_at DESC LIMIT 1', p0.id)!.status, 'verified');
+  } finally { h.cleanup(); }
+});
+
+test('review#65 F2: a package with credentials is never exported for release verification', async () => {
+  const { prepareVmSource, runVmCommand } = await import('../src/vm/devvm.js');
+  const fake = installFake();
+  const dir = tmp('orch-pkg-');
+  mkdirSync(join(dir, 'dist'));
+  writeFileSync(join(dir, 'dist', '.env'), 'AWS_SECRET_ACCESS_KEY=abcdefghijklmnopqrstuvwxyz0123456789ABCD\n');
+  const prepared = await prepareVmSource({ kind: 'dir', dir });
+  try {
+    assert.ok(prepared.hits.length > 0);
+    const r = await runVmCommand(fake.bin, prepared, 'true', true, 60_000);
+    assert.equal(r.exitCode, null);
+    assert.match(r.spawnError!, /Nothing was exported/);
+    assert.equal(fake.calls().length, 0);
+  } finally { prepared.dispose(); }
+});

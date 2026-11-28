@@ -54,9 +54,13 @@ The orchestrator can run quality gates and release verification in these VMs. Th
 - Each gate archives the exact gated commit (`git archive`: no `.git`, no untracked files), streams it to a fresh guest,
   and records the command's real exit code and log. Gate commands run as the separate non-sudo user `devgate`, and in a
   private network namespace unless `security.gateNetwork` is true.
-- The built-in secret scan runs first. If it finds credentials, nothing is exported.
+- The exact archive is built once per gate run and scanned exhaustively (every directory including `dist/` and
+  `node_modules/`, binary and large files) before anything leaves Chasebot. Any hit blocks the export, for gates and
+  for release verification alike.
+- The command's exit status comes back out-of-band (`devvm gate --status-file`), so a command that itself exits 75
+  or 255 is recorded as a failure, not mistaken for an outage.
 - **When the VM host cannot run a gate** (PC asleep and not waking, gaming pause, pool full, SSH lost mid-run), `devvm`
-  exits 75 (or ssh's 255). That is not a gate result: no result is recorded, no remediation starts, and gates wait
+  exits 75 and writes no status. That is not a gate result: no result is recorded, no remediation starts, and gates wait
   `vm.unavailableRetryMin` minutes before trying again. One `gates.backend_unavailable` event is emitted per outage, and
   `orchestrator status` shows the wait. **Gates never fall back to running on Chasebot.**
 - The legacy key `security.devVmGateCommand` (from the first version of this branch) is rejected with a message naming
@@ -74,7 +78,7 @@ Manual check from a scratch repository on Chasebot: `sh deploy/devvm/gate-smoke.
 
 The Windows program is in `C:\ProgramData\AIDevVM`. With the desktop worker, its data, VirtualBox registry, and Terraform lease state live under `E:\AIDevVM-Desktop` (the original `E:\AIDevVM` is left unused). The worker's separate `VBOX_USER_HOME` starts its own VBoxSVC, so the account's personal VirtualBox VMs are not affected.
 
-Under NEM, a fresh guest takes about 2.5 minutes to finish first boot and cloud-init, and longer when several boot at once. `devvm provision` waits up to 7 minutes (capped at the lease's expiry). The orchestrator backend adds a 12-minute VM lifecycle allowance on top of each gate's `timeout_sec`. The Debian base disk is shared read-only as the source for independent full clones. Check failed starts with `Get-ScheduledTaskInfo AIDevVM-Worker`, `Get-Content E:\AIDevVM-Desktop\worker.log -Tail 30`, and the Windows OpenSSH event log. Keep any lease records with cleanup errors so the reaper can retry them.
+Under NEM, a fresh guest takes about 2.5 minutes to finish first boot and cloud-init, and longer when several boot at once. `devvm provision` waits up to 7 minutes (capped at the lease's expiry). The orchestrator backend adds a 20-minute VM lifecycle allowance (wake, provisioning, first boot) on top of each gate's `timeout_sec`, and gives `devvm` two minutes after SIGTERM to destroy its lease. The Debian base disk is shared read-only as the source for independent full clones. Check failed starts with `Get-ScheduledTaskInfo AIDevVM-Worker`, `Get-Content E:\AIDevVM-Desktop\worker.log -Tail 30`, and the Windows OpenSSH event log. Keep any lease records with cleanup errors so the reaper can retry them.
 
 ## Integration decision
 

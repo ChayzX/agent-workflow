@@ -89,7 +89,9 @@ switch (op) {
       const x = spawnSync('tar', ['-xf', join(root, 'source.tar'), '-C', work]);
       if (x.status !== 0) fail('could not extract the source archive');
       appendFileSync(join(state, 'gates.jsonl'), JSON.stringify({ command, network, bytes: tarball.length, files: readdirSync(work).sort() }) + '\n');
-      process.exitCode = runIn(work, command, { CI: 'true', HOME: join(root, 'home', 'dev') });
+      const rc = runIn(work, command, { CI: 'true', HOME: join(root, 'home', 'dev') });
+      const statusFile = opt(rest.slice(0, sep >= 0 ? sep : undefined), '--status-file');
+      if (statusFile) { writeFileSync(statusFile, `${rc}\n`); process.exitCode = 0; } else process.exitCode = rc;
     } finally { rmSync(root, { recursive: true, force: true }); }
     break;
   }
