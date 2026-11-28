@@ -1,0 +1,21 @@
+[approved by operator] sudo systemctl reboot (VM orch-vm only)
+pre-reboot (recorded before reboot): 00:05:56Z boot_id 4286826d-7207-408c-ac76-45718ac94a03
+post-reboot boot_id: 620e2eff-3ae3-4578-979f-66fd9515340b
+$ uptime
+ 00:06:32 up 0 min,  1 user,  load average: 0.74, 0.19, 0.06
+$ who (no interactive session needed)
+$ loginctl show-user orch -p Linger -p State
+State=active
+Linger=yes
+$ systemctl --user status orchestrator
+● orchestrator.service - Agent Workflow Orchestrator supervisor
+     Loaded: loaded (/home/orch/.config/systemd/user/orchestrator.service; enabled; preset: enabled)
+     Active: active (running) since Sat 2026-11-28 00:06:25 UTC; 6s ago
+   Main PID: 806 (node)
+      Tasks: 7 (limit: 512)
+     Memory: 74.0M (max: 4.0G available: 2.8G peak: 75.1M)
+$ orchestrator logs | tail -4
+2026-11-28 00:04:43Z warn  security.sandbox       agent sandbox unavailable (no bubblewrap): agents run with a scrubbed environment only
+2026-11-28 00:04:43Z info  supervisor.recovered   recovery: requeued 0 task(s), reaped 0 orphan process(es), 0 git repair(s)
+2026-11-28 00:06:30Z warn  security.sandbox       agent sandbox unavailable (no bubblewrap): agents run with a scrubbed environment only
+2026-11-28 00:06:30Z info  supervisor.recovered   recovery: requeued 0 task(s), reaped 0 orphan process(es), 0 git repair(s)

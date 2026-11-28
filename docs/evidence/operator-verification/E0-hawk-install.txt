@@ -1,0 +1,21 @@
+
+  hawk CLI Installer
+
+  Channel: release - hawk v6.7.4
+  Downloading hawk v6.7.4 for linux-x64...
+  Verifying checksum...
+  Checksum verified.
+  Installing to /home/orch/hawk/bin...
+  Installed hawk v6.7.4 to /home/orch/hawk/bin/hawk
+
+  Added /home/orch/hawk/bin to PATH in /home/orch/.bashrc; new terminals will find hawk.
+  Added /home/orch/hawk/bin to PATH in /home/orch/.profile; new terminals will find hawk.
+  Set HAWK_NO_MODIFY_PATH=1 to skip this PATH change.
+  To use hawk in this terminal now, run:
+    export PATH="$PATH:/home/orch/hawk/bin"
+
+v6.7.4
+
+  Run 'hawk --help' to get started.
+
+exit=0

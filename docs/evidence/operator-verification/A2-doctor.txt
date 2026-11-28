@@ -1,0 +1,18 @@
+Doctor — /home/orch/.orchestrator
+  ✔ OS: Ubuntu 24.04.5 LTS (linux); memory 3/3 GB free
+  ✔ Node 22.23.5 (need >= 22.13)
+  ✔ git version 2.43.0
+  ✔ tar available
+  ✔ bubblewrap sandbox works
+  ✔ configuration valid
+  ✔ config permissions 600
+  ✔ disk free at /home/orch/.orchestrator: 15738 MB
+  ✔ database integrity: ok; schema v1
+  ✔ audit log hash chain intact
+  ✔ claude 2.1.332 (Claude Code): logged in (claude.ai)
+  ✔ codex codex-cli 0.172.0: Logged in using ChatGPT
+  ⚠ no GitHub token (needed only for GitHub mode)
+  ✔ supervisor running (pid 23145)
+
+All checks passed.
+exit=0

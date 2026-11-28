@@ -1,0 +1,140 @@
+$ ./bin/orchestrator self-package --out /home/orch/rel
+  ✔ /home/orch/rel/agent-workflow-orchestrator-0.1.0.zip
+    sha256 9a813f861930bd4e45dc6fa251e73f5fb8a5a1e23eb44e91c1a648875b83c5a5
+    167 files, checksums verified after clean extraction, CLI runs (0.1.0)
+exit=0
+$ rm -rf /tmp/clean; mkdir -p /tmp/clean && cp ~/rel/*.zip ~/rel/*.sha256 /tmp/clean/
+exit=0
+$ sha256sum -c *.sha256
+agent-workflow-orchestrator-0.1.0.zip: OK
+exit=0
+$ unzip -q *.zip -d x
+exit=0
+$ ls x; ls x/*
+agent-workflow-orchestrator-0.1.0
+README.md
+RELEASE-MANIFEST.json
+bin
+deploy
+dist
+docs
+examples
+package-lock.json
+package.json
+scripts
+src
+test
+tsconfig.json
+exit=0
+
+### Clean-room shell: env -i HOME=/tmp/cleanhome PATH=/usr/local/bin:/usr/bin:/bin (no claude/codex on PATH)
+### Run 1: README 'Install' step 1, answering y to CLI installs, n to the service
+$ cd /tmp/clean/x/agent-workflow-orchestrator-0.1.0 && ./deploy/install.sh   (stdin: y,y,n)
+
+==> Checking operating system
+  Ubuntu 24.04.5 LTS (x86_64)
+
+==> Checking dependencies
+  node v22.23.5, git 2.43.0
+
+==> Building (only if dist/ is missing — release ZIPs ship prebuilt)
+
+==> Linking the CLI into ~/.local/bin
+  add to PATH: export PATH="$HOME/.local/bin:$PATH"
+
+==> Provider CLIs (official tools; authentication stays inside them)
+npm error code EACCES
+npm error syscall mkdir
+npm error path /usr/local/lib/node_modules/@anthropic-ai
+npm error errno -13
+npm error Error: EACCES: permission denied, mkdir '/usr/local/lib/node_modules/@anthropic-ai'
+npm error     at async mkdir (node:internal/fs/promises:858:10)
+npm error     at async /usr/local/lib/node_modules/npm/node_modules/@npmcli/arborist/lib/arborist/reify.js:638:20
+npm error     at async Promise.allSettled (index 0)
+npm error     at async [reifyPackages] (/usr/local/lib/node_modules/npm/node_modules/@npmcli/arborist/lib/arborist/reify.js:334:11)
+npm error     at async Arborist.reify (/usr/local/lib/node_modules/npm/node_modules/@npmcli/arborist/lib/arborist/reify.js:149:5)
+npm error     at async Install.exec (/usr/local/lib/node_modules/npm/lib/commands/install.js:150:5)
+npm error     at async Npm.exec (/usr/local/lib/node_modules/npm/lib/npm.js:207:9)
+npm error     at async module.exports (/usr/local/lib/node_modules/npm/lib/cli/entry.js:74:5) {
+npm error   errno: -13,
+npm error   code: 'EACCES',
+npm error   syscall: 'mkdir',
+npm error   path: '/usr/local/lib/node_modules/@anthropic-ai'
+npm error }
+npm error
+npm error The operation was rejected by your operating system.
+npm error It is likely you do not have the permissions to access this file as the current user
+npm error
+npm error If you believe this might be a permissions issue, please double-check the
+npm error permissions of the file and its containing directories, or try running
+npm error the command again as root/Administrator.
+npm error A complete log of this run can be found in: /tmp/cleanhome/.npm/_logs/2026-11-27T23_33_00_755Z-debug-0.log
+exit=243
+
+### Run 2: same, answering n to both CLI installs and n to the service
+
+==> Checking operating system
+  Ubuntu 24.04.5 LTS (x86_64)
+
+==> Checking dependencies
+  node v22.23.5, git 2.43.0
+
+==> Building (only if dist/ is missing — release ZIPs ship prebuilt)
+
+==> Linking the CLI into ~/.local/bin
+  add to PATH: export PATH="$HOME/.local/bin:$PATH"
+
+==> Provider CLIs (official tools; authentication stays inside them)
+  skipped claude
+  skipped codex
+
+==> Configuration
+Orchestrator setup — home: /tmp/cleanhome/.orchestrator
+  ✔ Node 22.23.5
+  ✔ configuration written to /tmp/cleanhome/.orchestrator/config.json (0600)
+  ✔ database initialized at /tmp/cleanhome/.orchestrator/data/orchestrator.db (schema v1)
+  ⚠ claude: CLI not found. Install: npm install -g @anthropic-ai/claude-code
+  ⚠ codex: CLI not found. Install: npm install -g @openai/codex
+  ⚠ GitHub token not found. For GitHub mode create a token (classic PAT with "repo" and "project" scopes, or fine-grained with Issues/PRs/Contents RW for org repos) and save it:
+      install -m 600 /dev/null /tmp/cleanhome/.orchestrator/secrets/github-token && $EDITOR /tmp/cleanhome/.orchestrator/secrets/github-token
+  ✔ bubblewrap sandbox available
+
+Dashboard token (shown once — store it in your password manager):
+  [REDACTED]
+Dashboard: http://127.0.0.1:7420/
+
+Run `orchestrator setup --service` to install a systemd user service, or `orchestrator run` to run in the foreground.
+
+Next steps:
+  1. Authenticate providers on this server (once):
+       claude login            # or: claude setup-token   (Claude Pro/Max subscription)
+       codex login --device-auth                           (ChatGPT plan)
+  2. (GitHub mode) save a token:  install -m 600 /dev/null ~/.orchestrator/secrets/github-token && $EDITOR ~/.orchestrator/secrets/github-token
+  3. orchestrator doctor
+  4. orchestrator start --goal examples/goals/todo-cli.md --repo new
+  5. orchestrator status    |  dashboard: http://127.0.0.1:7420/
+exit=0
+
+### README Install: claude login / codex login --device-auth — NOT RUN in clean room (interactive subscription logins; done once in the main orch environment for A2)
+
+$ orchestrator doctor
+Doctor — /tmp/cleanhome/.orchestrator
+  ✔ OS: Ubuntu 24.04.5 LTS (linux); memory 3/3 GB free
+  ✔ Node 22.23.5 (need >= 22.13)
+  ✔ git version 2.43.0
+  ✔ tar available
+  ✔ bubblewrap sandbox works
+  ✔ configuration valid
+  ✔ config permissions 600
+  ✔ disk free at /tmp/cleanhome/.orchestrator: 16129 MB
+  ✔ database integrity: ok; schema v1
+  ✔ audit log hash chain intact
+  ✖ claude: CLI not installed (bwrap: execvp claude: No such file or directory
+)
+  ✖ codex: CLI not installed (bwrap: execvp codex: No such file or directory
+)
+  ⚠ no GitHub token (needed only for GitHub mode)
+  ⚠ supervisor not running
+
+2 problem(s) found.
+exit=1

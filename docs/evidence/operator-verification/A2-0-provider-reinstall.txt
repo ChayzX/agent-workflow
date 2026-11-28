@@ -1,0 +1,3 @@
+[sudo, approved] npm install -g @anthropic-ai/claude-code @openai/codex into /usr/local (workaround: sandbox cannot follow ~/.local/bin symlinks into hidden ~/.local/lib)
+claude: /usr/local/bin/claude 2.1.332 (Claude Code)
+codex: /usr/local/bin/codex codex-cli 0.172.0

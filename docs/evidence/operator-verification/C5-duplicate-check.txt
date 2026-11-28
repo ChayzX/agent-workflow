@@ -1,0 +1,33 @@
+2026-11-28T00:22:46Z
+issues created so far: 2
+$ kill -9 2279   (supervisor: orchestrator run)
+exit=0
+2026-11-28 00:22:45Z info  github.issue.created   #1 R-001: Input from file argument or standard input
+2026-11-28 00:22:46Z info  github.issue.created   #2 R-002: Ranked top-N output with alphabetical tie-break
+
+--- before restart
+no server running on /tmp/tmux-1001/default
+2026-11-28T00:23:10Z restarted supervisor in tmux
+2026-11-28 00:22:46Z info  github.issue.created   #2 R-002: Ranked top-N output with alphabetical tie-break
+2026-11-28 00:23:10Z info  supervisor.recovered   recovery: requeued 1 task(s), reaped 0 orphan process(es), 0 git repair(s)
+2026-11-28 00:23:10Z info  task.started           implement W-001 → claude/haiku (resume)
+2026-11-28 00:23:11Z info  github.issue.created   #4 R-004: --min-length L option
+2026-11-28 00:23:12Z debug provider.rate_limit_event claude rate-limit event
+2026-11-28 00:23:12Z info  github.issue.created   #5 R-005: --json machine-readable output
+2026-11-28 00:23:13Z info  github.issue.created   #6 R-006: Case-insensitive Unicode word tokenization
+2026-11-28 00:23:14Z info  github.issue.created   #7 R-007: Errors go to stderr with exit code 2
+2026-11-28 00:23:14Z info  github.issue.created   #8 R-008: Node.js >= 22, no runtime dependencies
+2026-11-28 00:23:15Z info  github.issue.created   #9 R-009: Tests run with node:test via npm test
+2026-11-28 00:23:16Z info  github.issue.created   #10 R-010: Core counting logic is an importable, unit-tested module
+2026-11-28 00:23:16Z info  github.issue.created   #11 R-011: End-to-end CLI tests that spawn the binary
+2026-11-28 00:23:17Z info  github.issue.created   #12 R-012: README with installation and usage examples
+2026-11-28 00:23:18Z info  github.issue.created   #13 R-013: Installable as a `wordfreq` command
+2026-11-28 00:23:19Z info  github.issue.created   #14 W-001: Scaffold package, test runner and quality-gate scripts
+2026-11-28 00:23:21Z info  task.succeeded         implement succeeded on claude
+2026-11-28 00:23:22Z info  gates.completed        task gates on 2c2abcbf: PASS (Unit and end-to-end tests=pass, Syntax check of all JavaScript sources=pass, Package contents check=pass, CLI smoke run=pass, secret-scan=pass)
+2026-11-28 00:23:24Z info  github.issue.created   #15 W-002: Implement core counting module
+2026-11-28 00:23:31Z info  github.issue.created   #16 W-004: Implement CLI entry point
+2026-11-28 00:23:38Z info  github.issue.created   #17 W-003: Unit tests for core module
+2026-11-28 00:23:44Z info  github.issue.created   #18 W-005: End-to-end CLI tests
+2026-11-28 00:23:53Z info  github.issue.created   #19 W-006: Write README with installation and usage
+2026-11-28 00:23:58Z info  github.issue.created   #20 W-007: Verify installation from a clean checkout and packed tarball

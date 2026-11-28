@@ -1,0 +1,35 @@
+$ orchestrator setup --service
+Orchestrator setup — home: /home/orch/.orchestrator
+  ✔ Node 22.23.5
+  ✔ existing configuration kept (/home/orch/.orchestrator/config.json); use --force to regenerate
+  ✔ database initialized at /home/orch/.orchestrator/data/orchestrator.db (schema v1)
+  ✔ claude 2.1.332 (Claude Code): authenticated (claude.ai)
+  ✔ codex codex-cli 0.172.0: authenticated (chatgpt)
+  ⚠ GitHub token not found. For GitHub mode create a token (classic PAT with "repo" and "project" scopes, or fine-grained with Issues/PRs/Contents RW for org repos) and save it:
+      install -m 600 /dev/null /home/orch/.orchestrator/secrets/github-token && $EDITOR /home/orch/.orchestrator/secrets/github-token
+  ✔ bubblewrap sandbox available
+  ✔ systemd user service installed and started (orchestrator.service)
+  For start at boot without login: sudo loginctl enable-linger $USER   (one-time, requires your authorization)
+exit=0
+$ loginctl enable-linger orch   # [sudo, via vmadmin]
+Linger=yes
+$ systemctl --user status orchestrator
+● orchestrator.service - Agent Workflow Orchestrator supervisor
+     Loaded: loaded (/home/orch/.config/systemd/user/orchestrator.service; enabled; preset: enabled)
+     Active: active (running) since Sat 2026-11-28 00:04:09 UTC; 23s ago
+   Main PID: 23145 (node)
+      Tasks: 7 (limit: 512)
+     Memory: 15.6M (max: 4.0G available: 2.8G peak: 18.8M)
+        CPU: 184ms
+     CGroup: /user.slice/user-1001.slice/user@1001.service/app.slice/orchestrator.service
+             └─23145 node --disable-warning=ExperimentalWarning /home/orch/agent-workflow/dist/src/cli/main.js daemon
+
+Nov 28 00:04:09 orch-vm systemd[21968]: Started orchestrator.service - Agent Workflow Orchestrator supervisor.
+Nov 28 00:04:10 orch-vm orchestrator[23145]: Dashboard on http://127.0.0.1:7420/
+## B1 sandbox under the user service
+supervisor log under systemd --user: 'agent sandbox unavailable (no bubblewrap): agents run with a scrubbed environment only' (00:04:09Z, 00:04:43Z — after AppArmor fix; doctor in a login shell says 'bubblewrap sandbox works')
+$ systemd-run --user --wait --pipe -p NoNewPrivileges=yes /usr/bin/bwrap --ro-bind / / --dev /dev --unshare-all true
+exit=0
+$ systemd-run --user --wait --pipe -p PrivateTmp=yes /usr/bin/bwrap --ro-bind / / --dev /dev --unshare-all true
+bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>.
+exit=1
