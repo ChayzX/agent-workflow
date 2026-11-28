@@ -1,0 +1,8 @@
+{
+  "windows_host": "192.0.2.10",
+  "windows_port": 2224,
+  "windows_user": "aidevvm",
+  "mac": "00:00:5e:00:53:01",
+  "broadcast": "192.0.2.255",
+  "wake_seconds": 180
+}

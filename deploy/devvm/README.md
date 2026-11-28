@@ -4,7 +4,7 @@ Chasebot runs the `devvm` CLI. It sends Wake-on-LAN when the gaming PC's control
 
 ## Agent commands
 
-Run these on Chasebot as `cpederson`. The CLI is installed at `~/.local/bin/devvm`. Successful management commands print JSON to stdout. Guest SSH forwards the command's stdout, stderr, and exit status.
+Run these on Chasebot as the orchestrator's service account (`<service-user>` below). The CLI is installed at `~/.local/bin/devvm`. Host-specific values (the gaming PC's address and MAC, the broadcast address) live in `~/.local/share/devvm/config.json` (mode 600), never in this repository; start from `config.example.json`. Successful management commands print JSON to stdout. Guest SSH forwards the command's stdout, stderr, and exit status.
 
 ```sh
 vm="$HOME/.local/bin/devvm"
@@ -27,41 +27,48 @@ For a shell-free script, save the lease ID before provisioning and call `destroy
 | `destroy ID` | Wake the host if needed, remove the VM and its disk through Terraform, and clear the local SSH identity. Repeating destroy on an absent lease succeeds. |
 | `pause`, `resume` | Close or reopen admission on an awake host. Existing jobs keep running during pause. To drain before gaming, pause, list the leases, then let them finish or explicitly destroy the ones you own. |
 | `wake` | Wake as needed and wait for the Windows worker's authenticated health response. |
+| `reachable` | Report whether the gaming PC's listener answers right now, without waking it. |
 
 ## Capacity and access
 
 - Each lease allows 1–4 vCPUs, 1–4 GiB RAM, an 8–24 GiB disk, and a 1–480 minute lifetime. Defaults are 2 vCPUs, 2 GiB RAM, 12 GiB disk, and 60 minutes.
 - Windows admits at most 3 leases, 6 assigned vCPUs, 8 GiB RAM, and 72 GiB of reserved virtual disk total. It also checks for at least 8 GiB of free host RAM after the requested allocation and 30 GiB of disk headroom after counting the reservations. Limits apply to the managed pool. Host applications and manually launched VMs still consume physical resources.
 - Guests run headless at low VirtualBox process priority with a 75% vCPU execution cap. The guest configuration disables 3D acceleration, USB, clipboard sharing and drag-and-drop. Game and anti-cheat compatibility depends on the title and must be checked with that title. Pause and drain the development pool for a session that needs all host resources.
-- Windows SSH accepts only Chasebot's Ed25519 key from `192.168.40.200`, uses a forced management command, and permits forwarding only to the pool's loopback SSH ports. Each guest has a separate disk, NAT interface and SSH host key. Guests with standard interactive networking may reach LAN destinations through NAT. Chasebot's `cpederson` account is the trusted controller boundary and can manage every lease. Give agents in separate trust contexts their own guest key and keep the controller key under the service account.
+- Windows SSH accepts only Chasebot's Ed25519 key from `<chasebot-ip>`, uses a forced management command, and permits forwarding only to the pool's loopback SSH ports. Each guest has a separate disk, NAT interface and SSH host key. Guests with standard interactive networking may reach LAN destinations through NAT. Chasebot's `<service-user>` account is the trusted controller boundary and can manage every lease. Give agents in separate trust contexts their own guest key and keep the controller key under the service account.
 - Windows holds an idle-sleep request while leases exist. A user-initiated sleep, shutdown, or power loss can interrupt work. The worker reaps abandoned and expired leases after Windows becomes available. Treat VM disks as disposable and keep source and outputs outside the lease.
 
 ## Agent Workflow Orchestrator
 
-This repository includes an opt-in backend for the existing quality gates. The tested upstream base is `8ee27cbd332bb58e2cd92dcd1b687ce876039209`. The backend archives the exact managed Git commit, sends only that archive to a fresh guest, and saves the command's actual exit code and logs in the orchestrator. Claude and Codex adapter processes, provider credentials, and Git operations stay on Chasebot. The built-in secret scan blocks export when it detects credentials. Gate commands use a separate non-sudo guest user and a private network namespace by default.
-
-Check out this branch on Chasebot, build it with Node.js 22, and merge this setting into its `$ORCH_HOME/config.json`. Projects that opt into VM gates should use tools present in the Debian image or explicitly arrange their prerequisites. Git submodules and untracked files are outside a Git archive.
+The orchestrator can run quality gates and release verification in these VMs. The backend is chosen **explicitly**:
 
 ```json
 {
-  "security": {
-    "devVmGateCommand": "/home/cpederson/.local/bin/devvm",
-    "gateNetwork": false
-  }
+  "security": { "gateBackend": "devvm", "gateNetwork": false },
+  "vm": { "command": "/home/<service-user>/.local/bin/devvm", "unavailableRetryMin": 5, "gate": { "cpus": 2, "ramMib": 2048, "diskGib": 12 } }
 }
 ```
 
-For a manual check of the same backend from a Git checkout on Chasebot, run:
+- The selection is written to the audit log (`security.gate_backend`) at every supervisor start, and `orchestrator doctor` reports it.
+- `vm.command` must be an absolute path to a regular, executable file owned by root or the service user, with no
+  group- or world-writable file or parent directory. Otherwise gates do not run at all (fail closed).
+- Each gate archives the exact gated commit (`git archive`: no `.git`, no untracked files), streams it to a fresh guest,
+  and records the command's real exit code and log. Gate commands run as the separate non-sudo user `devgate`, and in a
+  private network namespace unless `security.gateNetwork` is true.
+- The built-in secret scan runs first. If it finds credentials, nothing is exported.
+- **When the VM host cannot run a gate** (PC asleep and not waking, gaming pause, pool full, SSH lost mid-run), `devvm`
+  exits 75 (or ssh's 255). That is not a gate result: no result is recorded, no remediation starts, and gates wait
+  `vm.unavailableRetryMin` minutes before trying again. One `gates.backend_unavailable` event is emitted per outage, and
+  `orchestrator status` shows the wait. **Gates never fall back to running on Chasebot.**
+- The legacy key `security.devVmGateCommand` (from the first version of this branch) is rejected with a message naming
+  its replacement.
 
-```sh
-git archive HEAD | ~/.local/bin/devvm gate -- '. /etc/os-release; test "$VERSION_ID" = 13'
-```
+Manual check from a scratch repository on Chasebot: `sh deploy/devvm/gate-smoke.sh` (four checks; expect four PASS lines).
 
 ## Windows and Chasebot setup
 
-1. On Chasebot, generate a dedicated Ed25519 key with `ssh-keygen -t ed25519 -f ~/.local/share/devvm/windows_ed25519 -N ''`, using a data directory with mode 700. Supply only the resulting public key file to the Windows installer. Install `devvm` with mode 700 into `~/.local/bin`, and the two `devvm-prune` units in `~/.config/systemd/user`. Enable the timer with `systemctl --user daemon-reload && systemctl --user enable --now devvm-prune.timer`.
-2. On Windows, run `Prepare-Assets.ps1 -Destination <asset-directory>`. It verifies the fixed Debian, Terraform and pycdlib downloads. With an elevated PowerShell, run `Install-Windows.ps1 -Assets <asset-directory> -ControllerKeyFile <chasebot-key.pub> -Result <install.json>`. It creates the standard local account `aidevvm`, grants its batch logon right, starts `AIDevVM-Worker`, and brings up the SSH listener on port 2224. A clean installation expects the Windows OpenSSH service to be stopped and its server config to be absent.
-3. Transfer the **public** host key from the Windows result over a trusted channel. Write a single line to Chasebot's `~/.local/share/devvm/windows_known_hosts` containing `[192.168.40.136]:2224` followed by the two key fields `ssh-ed25519 BASE64`. Run `devvm wake`, then run `python3 acceptance.py` on Chasebot for the real lifecycle checks.
+1. On Chasebot, generate a dedicated Ed25519 key with `ssh-keygen -t ed25519 -f ~/.local/share/devvm/windows_ed25519 -N ''`, using a data directory with mode 700. Supply only the resulting public key file to the Windows installer. Install `devvm` with mode 700 into `~/.local/bin`, and the two `devvm-prune` units in `~/.config/systemd/user`. Enable the timer with `systemctl --user daemon-reload && systemctl --user enable --now devvm-prune.timer`. Copy `config.example.json` to `~/.local/share/devvm/config.json` (mode 600) and fill in the gaming PC's LAN address, its MAC address (for Wake-on-LAN) and the LAN broadcast address.
+2. On Windows, run `Prepare-Assets.ps1 -Destination <asset-directory>`. It verifies the fixed Debian, Terraform and pycdlib downloads. With an elevated PowerShell, run `Install-Windows.ps1 -Assets <asset-directory> -ControllerKeyFile <chasebot-key.pub> -ControllerAddress <chasebot-ip> -ListenAddress <gaming-pc-ip> -Result <install.json>`. It creates the standard local account `aidevvm`, grants its batch logon right, starts `AIDevVM-Worker`, and brings up the SSH listener on port 2224. A clean installation expects the Windows OpenSSH service to be stopped and its server config to be absent.
+3. Transfer the **public** host key from the Windows result over a trusted channel. Write a single line to Chasebot's `~/.local/share/devvm/windows_known_hosts` containing `[<gaming-pc-ip>]:2224` followed by the two key fields `ssh-ed25519 BASE64`. Run `devvm wake`, then run `python3 acceptance.py` on Chasebot for the real lifecycle checks.
 
 4. On this host, move the worker to the signed-in desktop account. From an elevated PowerShell started by that account, run `Use-DesktopWorker.ps1 -DesktopUser <account>` (add `-Resume` to finish an interrupted run). The `aidevvm` account stays the SSH entry point and can only queue requests in the spool folder. The reason: this CPU exposes no AMD-V to VirtualBox, so VirtualBox uses the Windows Hypervisor Platform (NEM). In the `aidevvm` batch session (session 0), VirtualBox's hardening rejects `WinHvPlatform.dll` as unsigned, and `startvm` fails with `VERR_NEM_INIT_FAILED`. In the desktop session it loads normally. The tradeoff: leases run with that account's token and only while it is signed in, because the task starts at logon.
 

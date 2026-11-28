@@ -3,6 +3,9 @@ param(
     [Parameter(Mandatory)] [string] $Assets,
     [Parameter(Mandatory)] [string] $ControllerKeyFile,
     [Parameter(Mandatory)] [string] $Result,
+    # Chasebot's LAN address (the only SSH client allowed) and this PC's LAN address (the listener).
+    [Parameter(Mandatory)] [ValidatePattern('^\d{1,3}(\.\d{1,3}){3}$')] [string] $ControllerAddress,
+    [Parameter(Mandatory)] [ValidatePattern('^\d{1,3}(\.\d{1,3}){3}$')] [string] $ListenAddress,
     [string] $DataRoot = 'E:\AIDevVM',
     [string] $Python = 'C:\Python313\python.exe',
     [switch] $Resume
@@ -197,7 +200,7 @@ try {
         ssh_keygen = $winKeygen
         image = Join-Path $app 'debian13.vdi'
     } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $app 'host.json') -Encoding ASCII
-    'from="192.168.40.200",no-agent-forwarding,no-pty,no-user-rc,no-X11-forwarding {0}' -f $publicKey |
+    'from="{0}",no-agent-forwarding,no-pty,no-user-rc,no-X11-forwarding {1}' -f $ControllerAddress,$publicKey |
         Set-Content -LiteralPath $keyFile -Encoding ASCII
 
     $runner = Join-Path $app 'Start-Worker.ps1'
@@ -277,7 +280,7 @@ Port 2224
 AddressFamily inet
 HostKey "$keyLocation"
 AuthorizedKeysFile "$authLocation"
-AllowUsers aidevvm@192.168.40.200
+AllowUsers aidevvm@$ControllerAddress
 AuthenticationMethods publickey
 PubkeyAuthentication yes
 PasswordAuthentication no
@@ -298,9 +301,9 @@ ForceCommand $cmd
         Direction = 'Inbound'
         Action = 'Allow'
         Protocol = 'TCP'
-        LocalAddress = '192.168.40.136'
+        LocalAddress = $ListenAddress
         LocalPort = 2224
-        RemoteAddress = '192.168.40.200'
+        RemoteAddress = $ControllerAddress
     }
     New-NetFirewallRule @firewall | Out-Null
     Set-Service sshd -StartupType Automatic
@@ -320,7 +323,7 @@ ForceCommand $cmd
     @{
         ready = $true
         hostPublicKey = (Get-Content -Raw -LiteralPath "$hostKey.pub").Trim()
-        ssh = '192.168.40.136:2224'
+        ssh = "${ListenAddress}:2224"
         listener = $listenerMode
         dataRoot = $DataRoot
         worker = (Get-ScheduledTask -TaskName $taskName).State.ToString()

@@ -11,6 +11,8 @@ import { newId, sha256, slugify } from '../core/ids.js';
 import type { ProjectRow } from '../core/types.js';
 import type { Workspace } from '../git/git.js';
 import { gateEnv, runSandboxed } from '../security/sandbox.js';
+import { gateBackendKind } from './gate-backend.js';
+import { runVmCommand } from '../vm/devvm.js';
 import { isForbiddenFile, scanTree } from '../security/secrets.js';
 import { collectDir, extractZip, writeZip } from '../util/zip.js';
 import type { Ctx } from './ctx.js';
@@ -131,9 +133,13 @@ export async function buildAndVerifyRelease(ctx: Ctx, store: Store, project: Pro
     if (reHits.length) problems.push(`secret scan of extracted package failed (${reHits.length} hits)`);
     const home = join(work, 'home');
     mkdirSync(home);
+    const vm = gateBackendKind(ctx.cfg) === 'devvm';
     for (const cmd of m2.verify_commands) {
-      const r = await runSandboxed(ctx.cfg, { cwd: root, writable: [root, home], hide: [ctx.paths.home], network: true }, cmd,
+      // With the VM backend, the clean-room install runs in a fresh VM too (never on this host).
+      const r = vm ? await runVmCommand(ctx.cfg.vm.command!, { kind: 'dir', dir: root }, cmd, true, 30 * 60_000, ctx.cfg.vm.gate)
+        : await runSandboxed(ctx.cfg, { cwd: root, writable: [root, home], hide: [ctx.paths.home], network: true }, cmd,
         { ...gateEnv({ ...ctx.cfg, security: { ...ctx.cfg.security, gateNetwork: true } }, home) }, 30 * 60_000);
+      if (vm && 'unavailable' in r && r.unavailable) { problems.push(`clean-environment verification could not run: the VM backend is unavailable (${(r.spawnError ?? r.stderr).trim().slice(-300)}); retry the release when the gaming PC is available`); break; }
       log.push(`$ ${cmd} → exit ${r.exitCode}${r.timedOut ? ' (timeout)' : ''}\n${excerpt(r.stdout + r.stderr, 3000)}`);
       if (r.exitCode !== 0) { problems.push(`clean-environment verification failed: \`${cmd}\` exited ${r.exitCode}`); break; }
     }

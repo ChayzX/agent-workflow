@@ -18,13 +18,47 @@ import uuid
 
 HOME = Path(os.environ.get("DEVVM_HOME", Path.home() / ".local" / "share" / "devvm")).expanduser().resolve()
 LEASES = HOME / "leases"
-WINDOWS = "192.168.40.136"
-WINDOWS_PORT = 2224
-WINDOWS_TARGET = f"aidevvm@{WINDOWS}"
-MAC = bytes.fromhex("00410e25e015")
-BROADCAST = "192.168.40.255"
 LEASE_ID = re.compile(r"[0-9a-f]{32}")
 KEY = re.compile(r"ssh-ed25519 [A-Za-z0-9+/=]{68}")
+# Exit status for "the VM backend could not run the command" (host asleep and not waking, gaming pause, capacity,
+# provisioning failure). The orchestrator waits and retries on this status instead of treating it as a gate result.
+EX_UNAVAILABLE = 75
+
+
+class Unavailable(RuntimeError):
+    """The VM host or pool cannot take work right now."""
+
+
+def load_host_config():
+    """Host-specific values live in $DEVVM_HOME/config.json (mode 0600), never in this file. See README."""
+    path = HOME / "config.json"
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        raise RuntimeError(f"Missing {path}; create it from config.example.json") from None
+    address = re.compile(r"(?:\d{1,3}\.){3}\d{1,3}")
+    host, broadcast = data.get("windows_host", ""), data.get("broadcast", "")
+    mac = re.sub(r"[^0-9a-f]", "", str(data.get("mac", "")).lower())
+    user = data.get("windows_user", "aidevvm")
+    if not address.fullmatch(host) or not address.fullmatch(broadcast):
+        raise RuntimeError(f"{path}: windows_host and broadcast must be IPv4 addresses")
+    if len(mac) != 12:
+        raise RuntimeError(f"{path}: mac must be the gaming PC's 6-byte MAC address")
+    if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", user):
+        raise RuntimeError(f"{path}: invalid windows_user")
+    port = int(data.get("windows_port", 2224))
+    return {"host": host, "port": port, "target": f"{user}@{host}", "mac": bytes.fromhex(mac),
+            "broadcast": broadcast, "wake_seconds": int(data.get("wake_seconds", 180))}
+
+
+_CONFIG = None
+
+
+def host_config():
+    global _CONFIG
+    if _CONFIG is None:
+        _CONFIG = load_host_config()
+    return _CONFIG
 
 
 def identifier(value):
@@ -34,16 +68,27 @@ def identifier(value):
 
 
 def wake_packet():
+    config = host_config()
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
         udp.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        udp.sendto(b"\xff" * 6 + MAC * 16, (BROADCAST, 9))
+        udp.sendto(b"\xff" * 6 + config["mac"] * 16, (config["broadcast"], 9))
+
+
+def reachable():
+    config = host_config()
+    try:
+        with socket.create_connection((config["host"], config["port"]), timeout=2):
+            return True
+    except OSError:
+        return False
 
 
 def wait_host():
-    end, next_wake = time.monotonic() + 180, 0
+    config = host_config()
+    end, next_wake = time.monotonic() + config["wake_seconds"], 0
     while time.monotonic() < end:
         try:
-            with socket.create_connection((WINDOWS, WINDOWS_PORT), timeout=2):
+            with socket.create_connection((config["host"], config["port"]), timeout=2):
                 return
         except OSError:
             now = time.monotonic()
@@ -52,7 +97,7 @@ def wait_host():
                 print("Wake-on-LAN sent to the gaming PC.", file=sys.stderr, flush=True)
                 next_wake = now + 15
             time.sleep(2)
-    raise TimeoutError("Gaming PC SSH listener did not become reachable within 180 seconds")
+    raise Unavailable(f"Gaming PC SSH listener did not become reachable within {config['wake_seconds']} seconds")
 
 
 def ssh_options(private, known):
@@ -64,13 +109,13 @@ def ssh_options(private, known):
 
 
 def windows_ssh():
-    return ssh_options(HOME / "windows_ed25519", HOME / "windows_known_hosts") + ["-p", str(WINDOWS_PORT)]
+    return ssh_options(HOME / "windows_ed25519", HOME / "windows_known_hosts") + ["-p", str(host_config()["port"])]
 
 
 def request(operation, wake=False, **parameters):
     if wake:
         wait_host()
-    completed = subprocess.run(windows_ssh() + ["-T", WINDOWS_TARGET, "devvm"], text=True,
+    completed = subprocess.run(windows_ssh() + ["-T", host_config()["target"], "devvm"], text=True,
                                input=json.dumps(dict(op=operation, **parameters)) + "\n",
                                capture_output=True, timeout=490)
     if completed.returncode:
@@ -92,7 +137,7 @@ def guest_ssh(lease, key=None, quiet=False):
     if not KEY.fullmatch(lease.get("host_key") or "") or not 22400 <= lease["port"] <= 22407:
         raise RuntimeError("Windows returned invalid guest SSH metadata")
     name = "adev-" + lease["id"]
-    proxy = shlex.join(windows_ssh() + ["-W", f'127.0.0.1:{lease["port"]}', WINDOWS_TARGET])
+    proxy = shlex.join(windows_ssh() + ["-W", f'127.0.0.1:{lease["port"]}', host_config()["target"]])
     options = ssh_options(key or folder / "identity", folder / "known_hosts") + [
         "-o", f"HostKeyAlias={name}", "-o", f"ProxyCommand={proxy}",
     ]
@@ -111,11 +156,27 @@ def get_lease(value):
     return lease
 
 
+def locked(folder):
+    """Open and exclusively lock folder/lock, retrying if prune removed the folder in between."""
+    for _ in range(20):
+        folder.mkdir(mode=0o700, exist_ok=True)
+        try:
+            lock = (folder / "lock").open("a")
+        except FileNotFoundError:
+            continue
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            if os.stat(folder / "lock").st_ino == os.fstat(lock.fileno()).st_ino:
+                return lock
+        except FileNotFoundError:
+            pass
+        lock.close()
+    raise RuntimeError(f"Could not lock {folder}")
+
+
 def provision(value, cpus, ram_mib, disk_gib, ttl_minutes, public_key=None):
     folder = LEASES / value
-    folder.mkdir(mode=0o700, exist_ok=True)
-    with (folder / "lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with locked(folder) as lock:
         private = folder / "identity"
         if public_key:
             public = Path(public_key).read_text().strip()
@@ -184,13 +245,21 @@ def prune():
                 expired = True
             if expired:
                 clear_local(folder.name)
+                # Remove the folder once only the lock is left. Unlink while holding the lock; `locked` notices.
+                if {item.name for item in folder.iterdir()} <= {"lock"}:
+                    (folder / "lock").unlink(missing_ok=True)
+                    folder.rmdir()
 
 
 def gate(command, cpus, ram_mib, disk_gib, ttl_minutes, network):
     """Read a trusted orchestrator's git archive on stdin and execute one command in a fresh VM."""
     value = uuid.uuid4().hex
     try:
-        lease = provision(value, cpus, ram_mib, disk_gib, ttl_minutes)
+        try:
+            lease = provision(value, cpus, ram_mib, disk_gib, ttl_minutes)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+            print(f"devvm: unavailable: {exc}", file=sys.stderr, flush=True)
+            return EX_UNAVAILABLE
         namespace = "" if network else "unshare --net --pid --fork --mount-proc "
         script = (
             "set -eu; directory=$(mktemp -d /tmp/agent-gate.XXXXXXXX); "
@@ -198,7 +267,10 @@ def gate(command, cpus, ram_mib, disk_gib, ttl_minutes, network):
             'sudo chown -hR devgate:devgate "$directory"; '
             f"exec sudo {namespace}runuser -u devgate -- env -C \"$directory\" CI=true /bin/bash -c " + shlex.quote(command)
         )
-        return subprocess.run(guest_ssh(lease, quiet=True) + ["dev@localhost", script], check=False).returncode
+        status = subprocess.run(guest_ssh(lease, quiet=True) + ["dev@localhost", script], check=False).returncode
+        if status == 255:
+            print("devvm: unavailable: guest SSH connection failed or was lost", file=sys.stderr, flush=True)
+        return status
     finally:
         try:
             # A running or partially created lease remains subject to the Windows reaper.
@@ -229,7 +301,7 @@ def main():
     remote_gate.add_argument("command")
     for operation in ("status", "destroy"):
         commands.add_parser(operation).add_argument("id", type=identifier)
-    for operation in ("list", "wake", "pause", "resume", "prune"):
+    for operation in ("list", "wake", "pause", "resume", "prune", "reachable"):
         commands.add_parser(operation)
     ssh = commands.add_parser("ssh")
     ssh.add_argument("--identity", type=Path)
@@ -251,6 +323,8 @@ def main():
         output = destroy(args.id)
     elif operation == "wake":
         output = request("ping", wake=True)
+    elif operation == "reachable":
+        output = {"reachable": reachable()}
     elif operation == "status":
         output = request("status", id=args.id)
     elif operation == "prune":
@@ -272,6 +346,9 @@ if __name__ == "__main__":
         sys.exit(main())
     except KeyboardInterrupt:
         sys.exit(130)
+    except Unavailable as error:
+        print(f"devvm: unavailable: {error}", file=sys.stderr)
+        sys.exit(EX_UNAVAILABLE)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         print(f"devvm: {error}", file=sys.stderr)
         sys.exit(1)

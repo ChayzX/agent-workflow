@@ -9,7 +9,8 @@ import type { QualityGate } from '../core/types.js';
 import { gateEnv, runSandboxed } from '../security/sandbox.js';
 import { scanTree } from '../security/secrets.js';
 import type { Ctx } from './ctx.js';
-import { runDevVmGate } from './devvm-gate.js';
+import { assertGatesRunnable, gateBackendKind, GateBackendUnavailableError, gatesRanOk, holdGates } from './gate-backend.js';
+import { runVmCommand } from '../vm/devvm.js';
 
 export interface GateResult { name: string; required: boolean; status: 'pass' | 'fail' | 'error'; exitCode: number | null; durationMs: number; excerpt: string; logPath: string; sandbox: string }
 export interface GateSummary { passed: boolean; results: GateResult[]; commit: string }
@@ -30,16 +31,19 @@ export async function runGates(ctx: Ctx, opts: { projectId: string; workItemId: 
   mkdirSync(logDir, { recursive: true, mode: 0o700 });
   const home = join(ctx.paths.home, 'gate-home', opts.projectId);
   mkdirSync(home, { recursive: true, mode: 0o700 });
-  const devVm = ctx.cfg.security.devVmGateCommand;
-  const blockExport = devVm && scanTree(opts.cwd).length > 0;
+  // Throws (nothing recorded) when the configured backend cannot run gates now; callers retry later.
+  assertGatesRunnable(ctx);
+  const vm = gateBackendKind(ctx.cfg) === 'devvm';
+  // Never export credentials to a VM: the built-in scan runs first and blocks the export.
+  const blockExport = vm && scanTree(opts.cwd).length > 0;
 
   for (const g of opts.gates) {
     const started = ctx.clock.now();
     const timeoutMs = (g.timeout_sec ?? 900) * 1000;
     const r = blockExport ? {
-      spawnError: 'Built-in secret scan found credentials. Source export was blocked.',
-      stdout: '', stderr: '', timedOut: false, exitCode: null, durationMs: 0, sandbox: 'debian-devvm',
-    } : devVm ? await runDevVmGate(devVm, opts.cwd, opts.gitDir, opts.commit, g.command, ctx.cfg.security.gateNetwork, timeoutMs)
+      spawnError: 'Built-in secret scan found credentials. Source export to the VM was blocked.',
+      stdout: '', stderr: '', timedOut: false, exitCode: null, durationMs: 0, sandbox: 'devvm',
+    } : vm ? await runVmCommand(ctx.cfg.vm.command!, { kind: 'git', cwd: opts.cwd, gitDir: opts.gitDir, commit: opts.commit }, g.command, ctx.cfg.security.gateNetwork, timeoutMs, ctx.cfg.vm.gate)
       : await runSandboxed(
       ctx.cfg,
       { cwd: opts.cwd, writable: [opts.cwd, home], readOnly: opts.gitDir ? [opts.gitDir] : [], hide: [ctx.paths.home], network: ctx.cfg.security.gateNetwork, readOnlyLast: [join(opts.cwd, '.git')] },
@@ -47,6 +51,12 @@ export async function runGates(ctx: Ctx, opts: { projectId: string; workItemId: 
       gateEnv(ctx.cfg, home),
       timeoutMs,
     );
+    if (vm && 'unavailable' in r && r.unavailable) {
+      // The VM never ran (or lost) the command: this is not a gate result. Wait and retry; never run it here.
+      const reason = `${g.name}: ${(r.spawnError ?? r.stderr).trim().split('\n').filter((l) => /devvm|ssh|unavailable/i.test(l)).slice(-2).join(' ') || `devvm exited ${r.exitCode}`}`;
+      holdGates(ctx, reason);
+      throw new GateBackendUnavailableError(reason);
+    }
     const out = `$ ${g.command}\n${r.stdout}\n${r.stderr}${r.timedOut ? '\n[timed out]' : ''}${r.spawnError ? `\n[spawn error] ${r.spawnError}` : ''}`;
     const logPath = join(logDir, `${g.name.replace(/[^a-z0-9_.-]/gi, '_')}.log`);
     writeFileSync(logPath, redact(out), { mode: 0o600 });
@@ -74,6 +84,7 @@ export async function runGates(ctx: Ctx, opts: { projectId: string; workItemId: 
     Date.now() - t0, secretOut.slice(0, 2000), secretLog, ctx.clock.now(),
   );
 
+  if (vm && !blockExport) gatesRanOk(ctx);
   const passed = results.every((r) => !r.required || r.status === 'pass');
   ctx.events.emit('gates.completed', `${opts.scope} gates on ${opts.commit.slice(0, 8)}: ${passed ? 'PASS' : 'FAIL'} (${results.map((r) => `${r.name}=${r.status}`).join(', ')})`, { projectId: opts.projectId, level: passed ? 'info' : 'warn' });
   return { passed, results, commit: opts.commit };

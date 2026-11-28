@@ -15,6 +15,7 @@ import { Supervisor } from '../engine/supervisor.js';
 import { Store } from '../engine/store.js';
 import { Dashboard, hashToken, coverage, providers as providerRows } from '../web/server.js';
 import { findBwrap } from '../security/sandbox.js';
+import { checkDevVmExecutable, devvm } from '../vm/devvm.js';
 import { exportRelease } from '../engine/release.js';
 import { collectDir, writeZip, extractZip } from '../util/zip.js';
 import { sha256 } from '../core/ids.js';
@@ -169,6 +170,11 @@ async function main(): Promise<number> {
           if (rel) out(`  Release ${rel.version}: ${rel.status} ${rel.zip_path ?? ''}`);
         }
         out('\nProviders: ' + ctx.capacity.all().map((s) => `${s.provider}=${s.status}${s.reset_at ? `(reset ${ago(s.reset_at)})` : ''}`).join('  '));
+        if ((cfg.security.gateBackend ?? 'local') === 'devvm') {
+          const ev = ctx.db.get<{ type: string; message: string; ts: number }>("SELECT type, message, ts FROM events WHERE type IN ('gates.backend_unavailable','gates.backend_available','security.vm_backend_unavailable','security.vm_backend_ok') ORDER BY id DESC LIMIT 1");
+          const waiting = ev && (ev.type === 'gates.backend_unavailable' || ev.type === 'security.vm_backend_unavailable');
+          out(`Gate backend: devvm (${cfg.vm.command})${waiting ? ` — WAITING since ${ago(ev!.ts)}: ${ev!.message}` : ''}`);
+        }
         return 0;
       }
       case 'pause': case 'resume': case 'stop': {
@@ -432,6 +438,23 @@ async function doctor(flags: Flags): Promise<number> {
   const sbx = ctx.db.get<{ type: string; message: string }>("SELECT type, message FROM events WHERE type IN ('security.sandbox_ok','security.sandbox_unavailable','security.sandbox') ORDER BY id DESC LIMIT 1");
   if (sbx?.type === 'security.sandbox_unavailable') fail(`the supervisor's own sandbox self-check failed at its last start (agents are not dispatched): ${sbx.message}`);
   else if (sbx?.type === 'security.sandbox_ok') ok('supervisor sandbox self-check passed at its last start (inside its own service environment)');
+  // Gate backend: chosen explicitly in config; the VM backend never falls back to running gates on this host.
+  if ((cfg.security.gateBackend ?? 'local') === 'devvm') {
+    const problem = checkDevVmExecutable(cfg.vm.command);
+    if (problem) fail(`gate backend devvm: ${problem}; gates will not run until this is fixed`);
+    else {
+      const r = await devvm(cfg.vm.command!, ['reachable'], { timeoutMs: 20_000 });
+      let up: boolean | null = null;
+      try { up = r.exitCode === 0 ? !!JSON.parse(r.stdout).reachable : null; } catch { /* unknown */ }
+      if (up === null) fail(`gate backend devvm (${cfg.vm.command}): could not query the VM host: ${(r.stderr || r.spawnError || '').trim().slice(0, 300)}`);
+      else ok(`gate backend devvm (${cfg.vm.command}): gates and release verification run in throwaway VMs; host ${up ? 'reachable' : 'asleep (woken on demand)'}`);
+    }
+    const vmc = ctx.db.get<{ type: string; message: string }>("SELECT type, message FROM events WHERE type IN ('security.vm_backend_ok','security.vm_backend_unavailable') ORDER BY id DESC LIMIT 1");
+    if (vmc?.type === 'security.vm_backend_unavailable') fail(`the supervisor's VM backend self-check failed at its last start: ${vmc.message}`);
+    else if (vmc) ok(`supervisor VM backend self-check at its last start: ${vmc.message}`);
+  } else {
+    ok('gate backend local: quality gates run in bubblewrap on this host');
+  }
   if (!/^(127\.0\.0\.1|localhost|::1)$/.test(cfg.dashboard.host)) warn(`dashboard bound to ${cfg.dashboard.host}: ensure TLS termination and network restrictions in front of it`);
   if (!cfg.dashboard.tokenHash) fail('dashboard token not configured: run `orchestrator dashboard-token`');
   ctx.db.close();

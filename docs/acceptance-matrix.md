@@ -87,6 +87,16 @@ An independent reviewer agent ran several rounds:
 - **systemd:** the service lifecycle works. The sandbox under both units failed and is fixed (see above). Not re-run.
 - **GitHub mode:** partially verified live. The defects it found are fixed. Not re-run.
 
+## VM gate backend (deploy/devvm, integrated in 0.1.2)
+| Requirement | Evidence | Status |
+|---|---|---|
+| VM chosen explicitly, audited at start, reported by `doctor` | `test/devvm.test.ts` (fake `devvm`): `security.gate_backend` audit row, `security.vm_backend_ok` event | ✅ test |
+| Unavailable VM host: gates wait, never run on the control plane, no remediation | `devvm e2e` and `unavailable VM host` tests (asleep, gaming pause, SSH lost mid-gate) | ✅ test |
+| Untrusted `devvm` executable or credentials in the tree: nothing exported | `credentials in the tree block the export` test | ✅ test |
+| Exact commit only, real exit codes, streamed 3 MB archive | `gates run in the VM ...` test | ✅ test |
+| Lifecycle on the real gaming PC (`acceptance.py`) | Passed on 2026-11-28 before the integration (deploy/devvm/STATUS.md) | ⚠️ live, before integration |
+| Smoke gate 1, Wake-on-LAN | `gate-smoke.sh`, `wake_acceptance.py` (operator-run) | ⏳ unverified |
+
 ## Not yet verified
 - A re-run of the operator procedure on the fixed build: install, units, and GitHub mode including a red-CI PR and a
   published release (#46).
