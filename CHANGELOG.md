@@ -4,7 +4,8 @@
 
 Fixes for defects found by the first operator verification on real infrastructure: a fresh Ubuntu 24.04 VM, systemd
 units, live GitHub with branch protection, and HawkScan (`docs/evidence/operator-verification/REPORT.md`). Each fix was
-independently reviewed (PRs #63 and the follow-up) and has a regression test. **Upgrade from 0.1.0 is recommended**:
+independently reviewed (PRs #63 and #64). Code fixes have regression tests; the installer, dashboard-token and
+`doctor` reporting changes are not covered by automated tests. **Upgrade from 0.1.0 is recommended**:
 0.1.0 can run agents unconfined when bubblewrap is broken.
 
 ### Security
@@ -16,11 +17,10 @@ independently reviewed (PRs #63 and the follow-up) and has a regression test. **
 - Provider CLIs installed under a hidden home are bound read-only as their package or single binary. A hidden root such
   as `$HOME` is never re-exposed.
 - Dashboard tokens are printed only to a terminal. Otherwise they are written to `secrets/dashboard-token` (0600).
-- The Codex billing guard fails closed when the login mode cannot be determined.
 
 ### GitHub mode
 - Git pushes now carry the supervisor's token, injected per call through the environment and never written to disk.
-  Before this, every push failed.
+  Before this, pushes had no credentials of their own and failed unless the host already had git credentials set up.
 - Reconciliation compares GitHub with both the last synced state and the state the local status implies. Merges, and
   "Closes #N" closing an issue, are no longer misread as human changes. That misreading caused a re-integration loop
   of 4,892 pushes.

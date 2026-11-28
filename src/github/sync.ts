@@ -108,9 +108,9 @@ export class GitHubSync {
     if (!issue) issue = (await this.markedIssues()).get(`${kind}:${key}`);
     if (!issue) {
       issue = await this.client.request<IssueLite>('POST', `${this.r}/issues`, { title: spec.title, body, labels, milestone: spec.milestone ?? undefined });
+      this.issueCache?.set(`${kind}:${key}`, issue); // before anything else can fail, so a retry finds it (no duplicate)
       // Issues cannot be created closed: an item that is already finished at its first sync is closed right away.
-      if (spec.state === 'closed') issue = await this.client.request<IssueLite>('PATCH', `${this.r}/issues/${issue.number}`, { state: 'closed', state_reason: spec.stateReason ?? 'completed' });
-      this.issueCache?.set(`${kind}:${key}`, issue);
+      if (spec.state === 'closed') { issue = await this.client.request<IssueLite>('PATCH', `${this.r}/issues/${issue.number}`, { state: 'closed', state_reason: spec.stateReason ?? 'completed' }); this.issueCache?.set(`${kind}:${key}`, issue); }
       this.events.emit('github.issue.created', `#${issue.number} ${spec.title}`, { projectId: this.projectId });
     } else {
       const curLabels = issue.labels.map((l) => l.name).sort().join(',');
