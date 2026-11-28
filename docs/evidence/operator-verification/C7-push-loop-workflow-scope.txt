@@ -1,0 +1,8 @@
+workflow-scope push errors: 4892 first 2026-11-28T02:59:06.965Z last 2026-11-28T04:48:26.415Z
+{"key":"W-001","status":"cancelled","branch":"orch/w-001-scaffold-package-test-runner-a","pr_number":21}
+{"key":"W-002","status":"merge_ready","branch":"orch/w-002-implement-core-counting-module","pr_number":22}
+{"key":"W-003","status":"merge_ready","branch":"orch/w-003-unit-tests-for-core-module","pr_number":null}
+{"key":"W-004","status":"merge_ready","branch":"orch/w-004-implement-cli-entry-point","pr_number":null}
+{"key":"W-005","status":"backlog","branch":null,"pr_number":null}
+{"key":"W-006","status":"backlog","branch":null,"pr_number":null}
+{"key":"W-007","status":"cancelled","branch":null,"pr_number":null}

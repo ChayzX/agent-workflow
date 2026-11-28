@@ -565,3 +565,147 @@ test('PR #61 review #9: runGates passes the shared repository to the gate sandbo
     assert.equal(withGit.passed, true, 'with gitDir git works read-only');
   } finally { h.cleanup(); }
 });
+
+test('operator verification #29: GitHub-mode git transport carries the supervisor token (env-scoped, never on disk)', async (t) => {
+  const tokDir = mkdtempSync(join(tmpdir(), 'orch-tok-'));
+  const tokFile = join(tokDir, 'github-token');
+  writeFileSync(tokFile, 'test-token-abc\n', { mode: 0o600 });
+  const saved = { a: process.env.GITHUB_TOKEN, b: process.env.ORCH_GITHUB_TOKEN };
+  delete process.env.GITHUB_TOKEN; delete process.env.ORCH_GITHUB_TOKEN; // isolate from the host environment
+  t.after(() => { if (saved.a !== undefined) process.env.GITHUB_TOKEN = saved.a; if (saved.b !== undefined) process.env.ORCH_GITHUB_TOKEN = saved.b; });
+  const h = makeHarness(demoBehaviour(), (c) => { c.github.tokenFile = tokFile; });
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    const ws = h.sup.workflow.ws({ ...p0, repo_mode: 'github' });
+    const env = (ws as any).auth() as Record<string, string>;
+    assert.equal(env.GIT_CONFIG_KEY_0, 'http.https://github.com/.extraheader');
+    assert.equal(env.GIT_CONFIG_VALUE_0, `AUTHORIZATION: basic ${Buffer.from('x-access-token:test-token-abc').toString('base64')}`);
+    assert.deepEqual((h.sup.workflow.ws(p0) as any).auth(), {}, 'local mode gets no credentials');
+  } finally { h.cleanup(); rmSync(tokDir, { recursive: true, force: true }); }
+});
+
+test('operator verification #31: rejected pushes never retry in a tight loop (scope/auth block at once; others back off, then block)', async () => {
+  const h = makeHarness(demoBehaviour());
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    await drive(h, (x) => done(x.status), p0.id, { maxTicks: 900 });
+    const wf = h.sup.workflow; const proj = wf.store.project(p0.id)!;
+    const reset = (key: string) => { h.ctx.db.run("UPDATE work_items SET status='merge_ready' WHERE project_id=? AND key=?", p0.id, key); return wf.store.workItemByKey(p0.id, key)!; };
+    let w = reset('W-001');
+    (wf as any).onPushFailure(proj, w, "! [remote rejected] orch/w-001 (refusing to allow a Personal Access Token to create or update workflow `.github/workflows/ci.yml` without `workflow` scope)");
+    w = wf.store.workItemByKey(p0.id, 'W-001')!;
+    assert.equal(w.status, 'blocked'); assert.match(w.status_reason ?? '', /workflow` scope/);
+    w = reset('W-002');
+    (wf as any).onPushFailure(proj, w, "fatal: could not read Username for 'https://github.com': terminal prompts disabled");
+    assert.equal(wf.store.workItemByKey(p0.id, 'W-002')!.status, 'blocked', 'missing credentials block at once');
+    w = reset('W-003');
+    const delays: number[] = [];
+    for (let i = 0; i < 4; i++) {
+      (wf as any).onPushFailure(proj, w, 'error: RPC failed; curl 56 connection reset');
+      delays.push(((wf as any).pushRetryAt.get(w.id) as number) - h.clock.now());
+      h.clock.advance(1);
+    }
+    assert.deepEqual(delays, [30_000, 60_000, 120_000, 240_000], 'exponential backoff');
+    assert.equal(wf.store.workItemByKey(p0.id, 'W-003')!.status, 'merge_ready');
+    // While backing off, the item does not take the project's integration slot (other items are not starved).
+    const jobs = (wf as any).jobs as Map<string, Promise<void>>;
+    h.ctx.db.run("UPDATE projects SET status='active' WHERE id=?", p0.id);
+    (wf as any).advanceActive(wf.store.project(p0.id)!);
+    assert.equal(jobs.has(`integration:${p0.id}`), false, 'no integration job for an item in backoff');
+    // A successful push ends the streak: the count is consecutive, not cumulative.
+    h.ctx.db.run('INSERT INTO checkpoints(id, project_id, work_item_id, task_id, kind, summary, data, created_at) VALUES (?,?,?,?,?,?,?,?)', 'ck-ok', p0.id, w.id, null, 'push_ok', 'ok', '{}', h.clock.now());
+    h.clock.advance(1);
+    (wf as any).onPushFailure(proj, w, 'error: RPC failed; curl 56 connection reset');
+    assert.equal(wf.store.workItemByKey(p0.id, 'W-003')!.status, 'merge_ready', 'streak restarted after a successful push');
+    assert.equal(((wf as any).pushRetryAt.get(w.id) as number) - h.clock.now(), 30_000);
+    for (let i = 0; i < 4; i++) { h.clock.advance(1); (wf as any).onPushFailure(proj, w, 'error: RPC failed; curl 56 connection reset'); }
+    assert.equal(wf.store.workItemByKey(p0.id, 'W-003')!.status, 'blocked', 'blocked after 5 consecutive failures');
+  } finally { h.cleanup(); }
+});
+
+test('operator verification #49/#53: without a working sandbox, gates and agents fail closed unless explicitly opted out', async (t) => {
+  const sbx = await import('../src/security/sandbox.js');
+  const real = sbx.findBwrap();
+  sbx.overrideBwrapForTests(null);
+  t.after(() => sbx.overrideBwrapForTests(real ?? undefined));
+  const cfg = defaultConfig(mkdtempSync(join(tmpdir(), 'orch-fc-')));
+  // Gates: the untrusted command never runs unconfined; the gate records an error with the reason.
+  cfg.security.sandbox = 'auto';
+  const marker = join(cfg.home, 'ran');
+  const r = await sbx.runSandboxed(cfg, { cwd: cfg.home, writable: [cfg.home], hide: [], network: false }, `touch ${marker}`, { PATH: process.env.PATH! }, 5000);
+  assert.match(r.spawnError ?? '', /sandbox unavailable/);
+  assert.equal(existsSync(marker), false, 'command did not run');
+  cfg.security.sandbox = 'none';
+  const r2 = await sbx.runSandboxed(cfg, { cwd: cfg.home, writable: [cfg.home], hide: [], network: false }, `touch ${marker}`, { PATH: process.env.PATH! }, 5000);
+  assert.equal(r2.exitCode, 0); assert.equal(existsSync(marker), true, 'explicit opt-out runs it');
+  // Agents: the supervisor dispatches nothing and records why.
+  const h = makeHarness(demoBehaviour(), (c) => { c.security.agentSandbox = 'auto'; });
+  try {
+    await h.sup.sandboxSelfCheck();
+    assert.match(h.sup.sandboxBlocked ?? '', /agent sandbox unavailable/);
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    for (let i = 0; i < 30; i++) { await h.sup.tick(); h.clock.advance(1000); }
+    assert.equal(h.ctx.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE project_id=? AND status IN ('running','succeeded','failed','dead')", p0.id)!.n, 0, 'no agent task ran');
+    assert.ok(h.ctx.db.get("SELECT 1 FROM audit_log WHERE action='security.sandbox_unavailable'"));
+  } finally { await h.sup.workflow.drainJobs(); h.cleanup(); }
+});
+
+test('operator verification #48: provider CLIs symlinked into a hidden home have their real package bound read-only', async (t) => {
+  const sbx = await import('../src/security/sandbox.js');
+  if (!sbx.findBwrap()) { t.diagnostic('bubblewrap unavailable; skipped'); return; }
+  const orchHome = mkdtempSync(join(tmpdir(), 'orch-sym-home-'));
+  const pkg = join(orchHome, 'lib', 'node_modules', '@x', 'fakecli');
+  mkdirSync(join(pkg, 'bin'), { recursive: true }); mkdirSync(join(orchHome, 'bin'));
+  writeFileSync(join(pkg, 'package.json'), '{}'); writeFileSync(join(pkg, 'bin', 'cli.js'), '#!/bin/sh\necho ok\n', { mode: 0o755 });
+  symlinkSync(join(pkg, 'bin', 'cli.js'), join(orchHome, 'bin', 'fakecli'));
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${join(orchHome, 'bin')}:${savedPath}`;
+  t.after(() => { process.env.PATH = savedPath; rmSync(orchHome, { recursive: true, force: true }); });
+  const cfg = defaultConfig(join(orchHome, 'h')); cfg.security.agentSandbox = 'bwrap';
+  const w = sbx.wrapAgentCommand(cfg, { orchHome, provider: 'codex', writable: [], readOnly: [] }, 'fakecli', []);
+  const binds = w.args.flatMap((a, i) => (a === '--ro-bind' ? [w.args[i + 1]] : []));
+  assert.ok(binds.includes(pkg), `package root bound: ${binds.join(' ')}`);
+  const run = execFileSync(w.cmd, w.args, { encoding: 'utf8', env: { PATH: process.env.PATH! } });
+  assert.equal(run.trim(), 'ok', 'the symlinked CLI runs inside the sandbox');
+});
+
+test('PR #63 review B1: a standalone CLI binary directly in the home never re-exposes the home (SSH keys, GitHub token)', async (t) => {
+  const sbx = await import('../src/security/sandbox.js');
+  if (!sbx.findBwrap()) { t.diagnostic('bubblewrap unavailable; skipped'); return; }
+  const home = mkdtempSync(join(tmpdir(), 'orch-b1-home-'));
+  const orchHome = join(home, '.orch');
+  mkdirSync(join(home, '.ssh')); writeFileSync(join(home, '.ssh', 'id_rsa'), 'SSH-PRIVATE\n'); // orchestrator:allow-secret (test fixture)
+  mkdirSync(join(orchHome, 'secrets'), { recursive: true }); writeFileSync(join(orchHome, 'secrets', 'github-token'), 'TOKEN-SECRET\n'); // orchestrator:allow-secret (test fixture)
+  const bin = join(home, 'codex');
+  writeFileSync(bin, `#!/bin/sh\ncat ${join(home, '.ssh', 'id_rsa')} 2>/dev/null; cat ${join(orchHome, 'secrets', 'github-token')} 2>/dev/null; echo ran\n`, { mode: 0o755 });
+  const savedHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => { process.env.HOME = savedHome; rmSync(home, { recursive: true, force: true }); });
+  const cfg = defaultConfig(orchHome); cfg.security.agentSandbox = 'bwrap';
+  const w = sbx.wrapAgentCommand(cfg, { orchHome, provider: 'codex', writable: [], readOnly: [] }, bin, []);
+  const binds = w.args.flatMap((a, i) => (a === '--ro-bind' || a === '--bind' ? [w.args[i + 1]] : []));
+  assert.ok(!binds.includes(home) && !binds.includes(orchHome) && !binds.includes('/home'), `no hidden root re-bound: ${binds.join(' ')}`);
+  assert.ok(binds.includes(bin), 'only the binary file is bound');
+  const out = execFileSync(w.cmd, w.args, { encoding: 'utf8', env: { PATH: process.env.PATH!, HOME: home } });
+  assert.match(out, /ran/, 'the standalone binary still runs');
+  assert.doesNotMatch(out, /SSH-PRIVATE|TOKEN-SECRET/, 'secrets stay hidden');
+});
+
+test('PR #63 review B2: the reconcile revert path forces a re-sync (updated_at bumped) and audits', async () => {
+  const h = makeHarness(demoBehaviour());
+  try {
+    const p0 = newDemoProject(h, DEMO_GOAL);
+    const wf = h.sup.workflow; const proj = wf.store.project(p0.id)!;
+    await drive(h, (x) => !!wf.store.workItemByKey(p0.id, 'W-003'), p0.id, { maxTicks: 200 });
+    const w3 = wf.store.workItemByKey(p0.id, 'W-003')!;
+    let synced = 0;
+    (h.ctx as any).github = () => ({ reconcileExternal: async () => [{ key: 'W-003', change: 'closed' }], syncAll: async () => { synced++; } });
+    const before = wf.store.workItemByKey(p0.id, 'W-003')!.updated_at;
+    (wf as any).lastSync.delete(p0.id);
+    (wf as any).syncGitHub(proj);
+    await wf.drainJobs();
+    assert.ok(wf.store.workItemByKey(p0.id, 'W-003')!.updated_at > before, 'updated_at bumped so syncAll rewrites the issue');
+    assert.equal(synced, 1);
+    assert.ok(h.ctx.db.get("SELECT 1 FROM audit_log WHERE action='workitem.external_change_reverted' AND target=?", w3.key));
+  } finally { await h.sup.workflow.drainJobs(); h.cleanup(); }
+});

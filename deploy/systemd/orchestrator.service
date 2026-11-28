@@ -28,9 +28,11 @@ ReadWritePaths=/var/lib/orchestrator
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
-ProtectKernelTunables=yes
+# ProtectKernelTunables and ProtectKernelLogs are intentionally NOT set: they make the fresh /proc that bubblewrap
+# mounts for every agent and gate sandbox fail ("Can't mount proc on /newroot/proc: Operation not permitted").
+# Found by operator testing on Ubuntu 24.04, where every other setting here was tested individually with bubblewrap;
+# the combined unit without these two has not been re-run yet.
 ProtectKernelModules=yes
-ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes

@@ -48,7 +48,7 @@ These require an operator approval (`orchestrator approvals`, or the dashboard):
   - Read-only: toolchains and the shared repository objects.
   - Writable: only their worktree, its git index directory, and the provider's own session and cache directories.
   - Network: kept.
-  - **Without bubblewrap**, agents run as the service user with a scrubbed environment, so a malicious agent could read files that user can read. In that case use the dedicated service account and the hardened unit, or install bubblewrap (`doctor` warns).
+  - **Without a working bubblewrap, no agent runs (fail closed).** The supervisor probes bubblewrap at start, inside its own service environment and with the same mounts and namespaces the sandboxes use, and records `security.sandbox_ok` or `security.sandbox_unavailable`; `doctor` reports that result. Only an explicit `security.agentSandbox: "none"` runs agents unconfined (scrubbed environment only), and that is audited at every start.
 - **Worktree git metadata is never trusted.** Before every supervisor git operation on a worktree, the `.git` pointer,
   `gitdir`, `commondir` and `HEAD` are verified against values the supervisor recorded outside agent reach. Mismatches
   are repaired and audited as `security.git_tamper`. Git then runs with explicit `GIT_DIR`/`GIT_WORK_TREE`/
@@ -71,7 +71,7 @@ These require an operator approval (`orchestrator approvals`, or the dashboard):
   - `~/.claude.json` must stay writable, so its `mcpServers` entries are snapshotted at startup, and any change during an
     agent run is reverted and audited.
 - **Supervisor git operations** run with hooks disabled (`core.hooksPath=/dev/null`), `fsmonitor` off and `ext::` transport disabled. The shared repository config is reduced to an allowlist before every fetch and push, so agents cannot redirect authenticated pushes (`url.*.insteadOf`, `http.*`, `include.*`, credential helpers).
-- **Without bubblewrap**, gate commands also run unsandboxed (`doctor` warns about this).
+- **Without a working bubblewrap, gate commands do not run**: each gate is recorded as an error with the reason (fail closed). Only an explicit `security.sandbox: "none"` runs them unconfined.
 - **The dashboard has a single operator role.** There are no per-user accounts.
 - **HawkScan DAST was not run** in the build environment, because installing the hawk CLI was not permitted there. A
   manual probe of authentication, CSRF, headers, limits, traversal and throttling was run instead; see the acceptance

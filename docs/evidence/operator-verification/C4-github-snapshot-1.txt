@@ -1,0 +1,53 @@
+# C4 GitHub structure snapshot 2026-11-28T00:25:17Z
+## issues
+#1	R-001: Input from file argument or standard input	[orchestrator,kind:requirement,priority:P1]	milestone=null
+#2	R-002: Ranked top-N output with alphabetical tie-break	[orchestrator,kind:requirement,priority:P1]	milestone=null
+#3	R-003: --top N option	[orchestrator,kind:requirement,priority:P1]	milestone=null
+#4	R-004: --min-length L option	[orchestrator,kind:requirement,priority:P1]	milestone=null
+#5	R-005: --json machine-readable output	[orchestrator,kind:requirement,priority:P1]	milestone=null
+#6	R-006: Case-insensitive Unicode word tokenization	[orchestrator,kind:requirement,priority:P1]	milestone=null
+#7	R-007: Errors go to stderr with exit code 2	[orchestrator,kind:requirement,priority:P1]	milestone=null
+#8	R-008: Node.js >= 22, no runtime dependencies	[orchestrator,kind:requirement,priority:P1]	milestone=null
+#9	R-009: Tests run with node:test via npm test	[orchestrator,kind:requirement,priority:P1]	milestone=null
+#10	R-010: Core counting logic is an importable, unit-tested module	[orchestrator,kind:requirement,priority:P1]	milestone=null
+#11	R-011: End-to-end CLI tests that spawn the binary	[orchestrator,kind:requirement,priority:P1]	milestone=null
+#12	R-012: README with installation and usage examples	[orchestrator,kind:requirement,priority:P2]	milestone=null
+#13	R-013: Installable as a `wordfreq` command	[orchestrator,kind:requirement,priority:P2]	milestone=null
+#14	W-001: Scaffold package, test runner and quality-gate scripts	[orchestrator,kind:work-item,type:chore,priority:P1]	milestone=M1 Foundation
+#15	W-002: Implement core counting module	[orchestrator,kind:work-item,type:feature,priority:P1]	milestone=M2 Core
+#16	W-004: Implement CLI entry point	[orchestrator,kind:work-item,type:feature,priority:P1]	milestone=M3 CLI
+#17	W-003: Unit tests for core module	[orchestrator,kind:work-item,type:test,priority:P2]	milestone=M2 Core
+#18	W-005: End-to-end CLI tests	[orchestrator,kind:work-item,type:test,priority:P2]	milestone=M3 CLI
+#19	W-006: Write README with installation and usage	[orchestrator,kind:work-item,type:docs,priority:P3]	milestone=M4 Docs and release readiness
+#20	W-007: Verify installation from a clean checkout and packed tarball	[orchestrator,kind:work-item,type:test,priority:P3]	milestone=M4 Docs and release readiness
+## sub-issues (parent -> children)
+#1 -> [16,18]
+#2 -> [15,17]
+#3 -> []
+#4 -> []
+#5 -> []
+#6 -> []
+#7 -> []
+#8 -> [14,20]
+#9 -> []
+#10 -> []
+#11 -> []
+#12 -> [19]
+#13 -> []
+## blocked_by
+#14 blocked by []
+#15 blocked by [14]
+#16 blocked by [15]
+#17 blocked by [15]
+#18 blocked by [16]
+#19 blocked by [16]
+#20 blocked by [18,19]
+## milestones
+M1 Foundation open=1 closed=0
+M2 Core open=2 closed=0
+M3 CLI open=2 closed=0
+M4 Docs and release readiness open=2 closed=0
+## branches
+main
+## PRs
+0

@@ -1,0 +1,120 @@
+# E — HawkScan DAST (issue #52)
+hawk v6.7.4 (official install.sh, sha256-verified); StackHawk app agent-workflow-dashboard 4ef156cb-d830-431e-9d69-3b36192c3c72 (created via REST API: 'hawk create app' failed with 'Cannot find organization')
+Target: 127.0.0.1:7421 = isolated instance of the same build (not the live 7420 supervisor running section C; active rules would hit stop/approve/reset endpoints)
+Auth: external COOKIE orch_session + headers X-Orchestrator-CSRF: 1 and Origin; testPath /api/overview; /api/logout excluded
+
+## Scan 1 (spider only) — stackhawk.yml
+StackHawk 🦅 HAWKSCAN - v6.7.4
+* application:             agent-workflow-dashboard
+* environment:             Development
+* scan id:                 c66e1eb6-2636-4161-8ac7-cdd315d6147c
+* scan configs:            ['/home/orch/hawk/stackhawk.yml']
+* app host:                http://127.0.0.1:7421
+* hawk memory:             990m
+Configuring scan engine
+* Authentication succeeded *
+Test path /api/overview returned a successful match
+Default Context Spider started
+Default Context Spider complete
+Discovered 8 URLs:
+http://127.0.0.1:7421/
+  http://127.0.0.1:7421/?token=HSTE
+  http://127.0.0.1:7421/api
+  http://127.0.0.1:7421/api/overview
+  http://127.0.0.1:7421/app.js
+  http://127.0.0.1:7421/robots.txt
+  http://127.0.0.1:7421/sitemap.xml
+  http://127.0.0.1:7421/style.css
+Default Context Active scan of http://127.0.0.1:7421 started
+Default Context Active scan of http://127.0.0.1:7421 complete
+Sending remaining alerts to platform
+Scan results for http://127.0.0.1:7421
+------------------------------------------------------------
+Criticality: New/Triaged
+   High: 0/0    Medium: 0/0    Low: 0/0
+------------------------------------------------------------
+View on StackHawk platform: https://app.stackhawk.com/scans/c66e1eb6-2636-4161-8ac7-cdd315d6147c
+Stopping scan engine
+exit=0
+
+## Scan 2 (spider + seedPaths + HAR of all 13 API routes incl. POSTs) — stackhawk2.yml
+StackHawk 🦅 HAWKSCAN - v6.7.4
+* application:             agent-workflow-dashboard
+* environment:             Development
+* scan id:                 6ec7e177-24b8-40be-9072-eb6ebfb12b2b
+* scan configs:            ['/home/orch/hawk/stackhawk2.yml']
+* app host:                http://127.0.0.1:7421
+* hawk memory:             990m
+Configuring scan engine
+* Authentication succeeded *
+Test path /api/overview returned a successful match
+Default Context Spider started
+Default Context Spider complete
+Discovered 25 URLs:
+http://127.0.0.1:7421/
+  http://127.0.0.1:7421/?token=HSTE
+  http://127.0.0.1:7421/api
+  http://127.0.0.1:7421/api/approvals
+  http://127.0.0.1:7421/api/approvals/apprtest
+  http://127.0.0.1:7421/api/approvals/apprtest/deny
+  http://127.0.0.1:7421/api/config
+  http://127.0.0.1:7421/api/config/concurrency
+  http://127.0.0.1:7421/api/events
+  http://127.0.0.1:7421/api/login
+  ... 15 additional URLs
+Default Context Passive scanning started
+Default Context Passive scanning complete
+Default Context Active scan of http://127.0.0.1:7421 started
+Default Context Active scan of http://127.0.0.1:7421 complete
+Default Context Passive scanning started
+Default Context Passive scanning complete
+Sending remaining alerts to platform
+Scan results for http://127.0.0.1:7421
+------------------------------------------------------------
+Criticality: New/Triaged
+   High: 0/0    Medium: 0/0    Low: 0/0
+------------------------------------------------------------
+View on StackHawk platform: https://app.stackhawk.com/scans/6ec7e177-24b8-40be-9072-eb6ebfb12b2b
+Stopping scan engine
+exit=0
+
+## stackhawk2.yml
+# Authenticated DAST of the orchestrator dashboard (scan-target instance on 7421; see E2-scan-instance.txt)
+app:
+  applicationId: 4ef156cb-d830-431e-9d69-3b36192c3c72
+  env: Development
+  host: http://127.0.0.1:7421
+  excludePaths:
+    - "/api/logout"
+  authentication:
+    external:
+      values:
+        - type: COOKIE
+          value:
+            name: orch_session
+            val: ${SESSION_COOKIE}
+        - type: TOKEN
+          value:
+            name: X-Orchestrator-CSRF
+            val: "1"
+        - type: TOKEN
+          value:
+            name: Origin
+            val: http://127.0.0.1:7421
+    testPath:
+      path: /api/overview
+      success: ".*200.*"
+      requestMethod: GET
+hawk:
+  spider:
+    base: true
+    maxDurationMinutes: 5
+    seedPaths:
+      - /api/overview
+      - /api/providers
+      - /api/approvals
+      - /api/events
+    har:
+      file:
+        paths:
+          - /home/orch/hawk/api.har

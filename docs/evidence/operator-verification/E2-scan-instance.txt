@@ -1,0 +1,7 @@
+# Scan target: separate throwaway instance of the same build (not the live 7420 supervisor running section C)
+HOME=/home/orch/scan-home ORCH_HOME=/home/orch/scan-home/.orchestrator, dashboard 127.0.0.1:7421, no provider logins, no GitHub token
+$ orchestrator setup -> exit=0 (output contains a token; not recorded)
+$ jq .dashboard.port=7421
+$ orchestrator dashboard-token -> token saved to ~/hawk/scan-dashboard-token (mode 600)
+HTTP/1.1 200 OK
+Set-Cookie: orch_session=[REDACTED]; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200

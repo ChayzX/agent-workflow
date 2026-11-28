@@ -1,0 +1,2 @@
+[sudo, approved] /etc/apparmor.d/bwrap profile (userns for /usr/bin/bwrap only) loaded
+BWRAP_OK

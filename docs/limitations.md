@@ -8,8 +8,15 @@ Stated plainly so nothing is over-claimed. See `docs/acceptance-matrix.md` for w
   The REST/GraphQL client and sync are contract-tested against an in-memory fake covering issues, sub-issues,
   dependencies, Projects v2 fields, PRs, checks, merges and releases. The live acceptance steps are in
   `docs/live-acceptance.md`.
-- **Fine-grained PATs cannot manage user-owned Projects (v2)** (a GitHub limitation). Use a classic PAT with `repo` and
-  `project` scopes for personal repositories.
+- **Fine-grained PATs cannot manage user-owned Projects (v2)** (a GitHub limitation). Use a classic PAT with `repo`,
+  `project` and `workflow` scopes for personal repositories. Without `workflow`, GitHub refuses any push that touches
+  `.github/workflows/`; the orchestrator then blocks that item with the exact fix instead of retrying.
+- **A GitHub issue has at most one sub-issue parent** (a GitHub rule). A work item that covers several requirements
+  appears as a sub-issue of the first requirement only; its other requirements reference it in the issue body.
+- **The live GitHub run (operator verification, 2026-11-28)** exercised issues, sub-issues, dependencies, Projects
+  fields, PRs, the human-review approval path, an exact-SHA merge and crash-replay idempotency, and found the defects
+  fixed in the follow-up (credentials for git pushes, reconciliation after merges, push retry storms). A red-CI PR was
+  not observed, and a GitHub Release was not published; see `docs/evidence/operator-verification/REPORT.md`.
 - **Cloud execution (Codex Cloud, Claude Code cloud) is assessed but not implemented as an adapter.** See
   `docs/cloud-assessment.md`.
 - **Oracle Cloud deployment is prepared** (manifests, IAM examples, preflight) **but was never run** against a real
@@ -34,8 +41,9 @@ Stated plainly so nothing is over-claimed. See `docs/acceptance-matrix.md` for w
   bubblewrap. It is not a fresh VM or container image; the build host had no container daemon.
 
 ## Security
-- **Without bubblewrap, agent processes are not OS-confined** beyond the scrubbed environment and the systemd unit. With
-  bubblewrap available (the default `auto`), they are confined; see `docs/security.md`.
+- **Confinement requires bubblewrap.** Without a working bubblewrap the supervisor refuses to run agents and gates
+  (fail closed). Setting `security.sandbox` / `security.agentSandbox` to `"none"` runs them unconfined with only a
+  scrubbed environment; each opt-out is written to the audit log at every supervisor start. See `docs/security.md`.
 - **The dashboard has a single operator token** and no RBAC. Keep it on loopback or behind TLS.
 - **HawkScan DAST was not run in the build environment** (installing the CLI was not permitted there). A manual probe of
   authentication, CSRF, headers, input limits, traversal and throttling was run, and two issues it found were fixed.

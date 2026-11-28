@@ -54,17 +54,21 @@ export function createApp(o: AppOptions = {}): Ctx {
   const policy = new Policy(db, clock, cfg, events);
   const ghCache = new Map<string, GitHubSync | null>();
   let token: string | null | undefined;
+  const githubToken = (): string | null => {
+    if (token === undefined) { try { token = resolveGitHubToken(cfg); } catch (e) { log.error('github token', { error: (e as Error).message }); token = null; } }
+    if (token) registerSecret(token);
+    return token;
+  };
   const ctx: Ctx = {
+    githubToken,
     db, clock, cfg, paths: p, events, log, queue, capacity, router, policy, adapters,
     github: (projectId: string) => {
       if (ghCache.has(projectId)) return ghCache.get(projectId)!;
       const proj = db.get<ProjectRow>('SELECT * FROM projects WHERE id=?', projectId);
       if (!proj || proj.repo_mode !== 'github') { ghCache.set(projectId, null); return null; }
-      if (token === undefined) { try { token = resolveGitHubToken(cfg); } catch (e) { log.error('github token', { error: (e as Error).message }); token = null; } }
-      if (!token) { ghCache.set(projectId, null); return null; }
-      registerSecret(token);
+      if (!githubToken()) { ghCache.set(projectId, null); return null; }
       const [owner, repo] = proj.repo_source.split('/');
-      const client = new GitHubClient({ token, apiUrl: cfg.github.apiUrl, graphqlUrl: cfg.github.graphqlUrl, uploadsUrl: cfg.github.uploadsUrl, fetchImpl: o.githubFetch });
+      const client = new GitHubClient({ token: token!, apiUrl: cfg.github.apiUrl, graphqlUrl: cfg.github.graphqlUrl, uploadsUrl: cfg.github.uploadsUrl, fetchImpl: o.githubFetch });
       const settings = json<ProjectSettings>(proj.settings, {} as ProjectSettings);
       const sync = new GitHubSync(client, db, clock, events, proj.id, owner!, repo!, {
         allowCreateProject: cfg.github.allowCreateProject, projectTitle: settings.github?.project_id ?? `${proj.name} (orchestrator)`, mergeMethod: cfg.github.mergeMethod,

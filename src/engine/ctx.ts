@@ -24,4 +24,6 @@ export interface Ctx {
   policy: Policy;
   adapters: Map<string, ProviderAdapter>;
   github: (projectId: string) => GitHubSync | null;
+  /** The supervisor's GitHub token (memoized; never written to disk or git config). Null when unavailable. */
+  githubToken?: () => string | null;
 }

@@ -119,7 +119,8 @@ export class GitHubSync {
         });
       }
     }
-    this.record(kind, key, { number: issue.number, node_id: issue.node_id, db_id: issue.id, url: issue.html_url });
+    // The state we last wrote/observed: reconciliation only treats a *difference from it* as a human change.
+    this.record(kind, key, { number: issue.number, node_id: issue.node_id, db_id: issue.id, url: issue.html_url, extra: { state: issue.state } });
     return issue;
   }
 
@@ -220,7 +221,7 @@ export class GitHubSync {
     const board = await this.ensureBoard().catch((e) => { this.events.emit('github.warn', `project board unavailable: ${(e as Error).message}`, { projectId: this.projectId, level: 'warn' }); return null; });
     for (const r of store.requirements(this.projectId)) {
       const m = this.mapped('requirement', r.key);
-      if (m && m.synced_at >= r.updated_at) continue;
+      if (m && m.synced_at > r.updated_at) continue;
       const issue = await this.ensureIssue('requirement', r.key, {
         title: `${r.key}: ${r.title}`, body: this.reqBody(r), labels: ['kind:requirement', `priority:P${Math.min(3, r.priority)}`, ...(r.status === 'blocked' ? ['blocked'] : [])],
         state: r.status === 'verified' ? 'closed' : 'open',
@@ -231,7 +232,7 @@ export class GitHubSync {
     const items = store.workItems(this.projectId);
     for (const w of items) {
       const m = this.mapped('work-item', w.key);
-      if (m && m.synced_at >= w.updated_at) continue;
+      if (m && m.synced_at > w.updated_at) continue; // a tie re-syncs (idempotent): same-millisecond updates are never lost
       const milestone = w.milestone ? await this.ensureMilestone(w.milestone).catch(() => null) : null;
       const issue = await this.ensureIssue('work-item', w.key, {
         title: `${w.key}: ${w.title}`, body: this.wiBody(w), milestone,
@@ -260,9 +261,17 @@ export class GitHubSync {
     for (const w of store.workItems(this.projectId)) {
       const i = marked.get(`work-item:${w.key}`);
       if (!i) continue;
-      const localClosed = ['merged', 'done', 'cancelled'].includes(w.status);
-      if (i.state === 'closed' && !localClosed) changes.push({ key: w.key, change: i.state_reason === 'not_planned' ? 'closed_not_planned' : 'closed' });
-      if (i.state === 'open' && localClosed && w.status !== 'cancelled') changes.push({ key: w.key, change: 'reopened' });
+      // A change is human only if GitHub differs from BOTH the state the orchestrator last synced and the state the
+      // item's local status implies. That rules out the window right after a merge (local closed, issue not yet closed
+      // by the next sync) and "Closes #N" closing the issue when the PR merges (GitHub closed, local still merging).
+      const implied = ['merged', 'done', 'cancelled'].includes(w.status) ? 'closed' : 'open';
+      const recorded = json<{ state?: string }>(this.mapped('work-item', w.key)?.extra, {}).state;
+      if (i.state === implied) continue;
+      if (recorded && i.state === recorded) continue;
+      if (!recorded && i.state === 'open') continue; // mapping from before state tracking: the next sync closes it
+      if (w.status === 'merging' && i.state === 'closed' && i.state_reason !== 'not_planned') continue; // PR merge pending detection
+      if (i.state === 'closed') changes.push({ key: w.key, change: i.state_reason === 'not_planned' ? 'closed_not_planned' : 'closed' });
+      else changes.push({ key: w.key, change: 'reopened' });
     }
     return changes;
   }
@@ -289,7 +298,7 @@ export class GitHubSync {
     if (!pr) {
       pr = await this.client.request('POST', `${this.r}/pulls`, {
         title: `${w.key}: ${w.title}`, head: w.branch, base,
-        body: `Implements ${w.github_issue_number ? `#${w.github_issue_number}` : w.key}.\n\n### Acceptance criteria\n${json<string[]>(w.acceptance, []).map((a) => `- ${a}`).join('\n')}\n\n${marker(this.projectId, 'pr', w.key)}\n_Opened by Agent Workflow Orchestrator after passing local quality gates and independent review._`,
+        body: `${w.github_issue_number ? `Closes #${w.github_issue_number}` : `Implements ${w.key}`}.\n\n### Acceptance criteria\n${json<string[]>(w.acceptance, []).map((a) => `- ${a}`).join('\n')}\n\n${marker(this.projectId, 'pr', w.key)}\n_Opened by Agent Workflow Orchestrator after passing local quality gates and independent review._`,
       });
     }
     this.record('pr', w.key, { number: pr!.number, url: pr!.html_url });

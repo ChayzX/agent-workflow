@@ -1,0 +1,46 @@
+$ npm config set prefix ~/.local   # workaround: unprivileged user cannot write /usr/local
+exit=0
+$ ORCH_YES=1 ./deploy/install.sh
+
+==> Checking operating system
+  Ubuntu 24.04.5 LTS (x86_64)
+
+==> Checking dependencies
+  node v22.23.5, git 2.43.0
+
+==> Building (only if dist/ is missing — release ZIPs ship prebuilt)
+
+==> Linking the CLI into ~/.local/bin
+
+==> Provider CLIs (official tools; authentication stays inside them)
+
+added 2 packages in 11s
+
+added 2 packages in 11s
+
+==> Configuration
+Orchestrator setup — home: /home/orch/.orchestrator
+  ✔ Node 22.23.5
+  ✔ configuration written to /home/orch/.orchestrator/config.json (0600)
+  ✔ database initialized at /home/orch/.orchestrator/data/orchestrator.db (schema v1)
+  ⚠ claude: not authenticated. Run on this server: `claude login` (subscription) or `claude setup-token`
+  ⚠ codex: not authenticated. Run on this server: `codex login --device-auth` (ChatGPT plan)
+  ⚠ GitHub token not found. For GitHub mode create a token (classic PAT with "repo" and "project" scopes, or fine-grained with Issues/PRs/Contents RW for org repos) and save it:
+      install -m 600 /dev/null /home/orch/.orchestrator/secrets/github-token && $EDITOR /home/orch/.orchestrator/secrets/github-token
+  ⚠ bubblewrap not available: quality gates run without an OS sandbox (install the "bubblewrap" package)
+
+Dashboard token (shown once — store it in your password manager):
+  [REDACTED]
+Dashboard: http://127.0.0.1:7420/
+  ✔ systemd user service installed and started (orchestrator.service)
+  For start at boot without login: sudo loginctl enable-linger $USER   (one-time, requires your authorization)
+
+Next steps:
+  1. Authenticate providers on this server (once):
+       claude login            # or: claude setup-token   (Claude Pro/Max subscription)
+       codex login --device-auth                           (ChatGPT plan)
+  2. (GitHub mode) save a token:  install -m 600 /dev/null ~/.orchestrator/secrets/github-token && $EDITOR ~/.orchestrator/secrets/github-token
+  3. orchestrator doctor
+  4. orchestrator start --goal examples/goals/todo-cli.md --repo new
+  5. orchestrator status    |  dashboard: http://127.0.0.1:7420/
+exit=0

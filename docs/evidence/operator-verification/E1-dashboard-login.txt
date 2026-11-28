@@ -1,0 +1,15 @@
+$ orchestrator dashboard-token   (output redacted; token saved to ~/hawk/dashboard-token mode 600)
+New dashboard token (shown once; restart the service to apply):
+  [REDACTED]
+exit=0
+token length: 32
+2026-11-28T00:27:22Z supervisor restarted in tmux so the new dashboard token takes effect
+HTTP/1.1 200 OK
+Set-Cookie: orch_session=[REDACTED]; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200
+--- checks
+GET /api/projects with cookie -> 404
+GET /api/projects without cookie -> 401
+GET /api/status with cookie -> 404
+GET /api/status without cookie -> 401
+POST /api/login wrong token -> 401
+POST /api/login no CSRF header -> 403

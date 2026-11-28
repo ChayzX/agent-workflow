@@ -101,7 +101,11 @@ Full details: `docs/security.md`.
 
 ## Install
 
-Requirements: Linux, Node.js ≥ 22.13, git, tar. bubblewrap is optional but recommended. Zero runtime npm dependencies.
+Requirements: Linux, Node.js ≥ 22.13, git, tar and a working **bubblewrap**. Agents and quality gates do not run without it (fail
+closed) unless you explicitly set `security.sandbox` / `security.agentSandbox` to `"none"`. On Ubuntu 24.04, AppArmor
+blocks bubblewrap's user namespaces by default; `deploy/install.sh` detects this and offers the one-file fix
+(`docs/troubleshooting.md`). Zero runtime npm dependencies. For GitHub mode, the classic PAT needs the `repo`, `project`
+and `workflow` scopes.
 
 ```bash
 ./deploy/install.sh          # guided: checks OS/deps, links the CLI, detects providers, runs setup, optional service
@@ -144,7 +148,7 @@ orchestrator doctor
 ## Status
 
 **v0.1.0.** The build was merged after five rounds of independent agent code review, which found 24 defects, all fixed
-with regression tests. `npm test` passes 56 of 56.
+with regression tests. `npm test` passes 64 of 64.
 
 - **Verified live:**
   - A complete product, `wordfreq`, built autonomously from one goal by real Claude agents. Verified release:
@@ -160,9 +164,14 @@ with regression tests. `npm test` passes 56 of 56.
     - When Codex hit a real usage limit, the work failed over to Claude.
     - The run recovered from a crash, and operator unblock/cancel commands were used.
     - The result was a verified release.
-- **Verified with simulated providers:** duplicate prevention, plus the GitHub sync against a fake GitHub.
-- **Pending (needs the operator; issues labelled `needs-operator`):** GitHub mode against the live API (needs a PAT),
-  a fresh-VM install, systemd on a real host, HawkScan DAST, OCI deployment. The run book for a local agent with server
-  access is `docs/operator-verification-prompt.md`.
+- **Operator verification on real infrastructure** (Ubuntu 24.04 VM, live GitHub, HawkScan; 2026-11-28,
+  `docs/evidence/operator-verification/REPORT.md`):
+  - HawkScan found 0 issues.
+  - The systemd service survived `kill -9` and a reboot.
+  - Live GitHub sync was idempotent across a crash, and a human-reviewed PR merged at its exact reviewed SHA.
+  - The run also found real defects: git pushes had no credentials; the sandbox failed open under systemd; merged
+    items were re-integrated in a push loop; the installer failed on a root-owned npm prefix. All are fixed with
+    tests, but the fixes **have not yet been re-run** on that infrastructure.
+- **Still pending:** that re-run (including a red-CI PR and a published release), and an OCI deployment (prepared only).
 
 Details: `docs/acceptance-matrix.md`.

@@ -246,7 +246,7 @@ async function main(): Promise<number> {
         raw.dashboard = { ...(raw.dashboard ?? {}), tokenHash: hashToken(token) };
         writeFileSync(configPath(cfg.home), JSON.stringify(raw, null, 2) + '\n', { mode: 0o600 });
         ctx.db.run('DELETE FROM dashboard_sessions');
-        out(`New dashboard token (shown once; restart the service to apply):\n  ${token}`);
+        out(`New dashboard token (restart the service to apply):\n  ${revealToken(cfg, token)}`);
         return 0;
       }
       case 'backup': {
@@ -301,6 +301,28 @@ async function main(): Promise<number> {
   }
 }
 
+function sandboxAdvice(cfg: Config): string {
+  const gatesOff = cfg.security.sandbox === 'none'; const agentsOff = cfg.security.agentSandbox === 'none';
+  const effect = gatesOff && agentsOff ? 'sandboxing is disabled by configuration, so agents and gates run unconfined'
+    : gatesOff ? 'agents will NOT run (fail closed); gates run unconfined by configuration'
+    : agentsOff ? 'quality gates will NOT run (fail closed); agents run unconfined by configuration'
+    : 'agents and quality gates will NOT run (fail closed)';
+  return `bubblewrap cannot create a sandbox here: ${effect}. Install "bubblewrap"; on Ubuntu 24.04 also allow its user namespaces (docs/troubleshooting.md). `
+    + 'Under systemd, do not set PrivateTmp in user units or ProtectKernelTunables/ProtectKernelLogs.';
+}
+
+/**
+ * Show a new dashboard token only on an interactive terminal. When output is piped or logged (installers, `tee`,
+ * CI), the token goes to a 0600 file instead, so it never lands in logs.
+ */
+function revealToken(cfg: Config, token: string): string {
+  if (process.stdout.isTTY) return `${token}   (shown once)`;
+  const f = join(paths(cfg).secrets, 'dashboard-token');
+  mkdirSync(dirname(f), { recursive: true, mode: 0o700 });
+  writeFileSync(f, token + '\n', { mode: 0o600 });
+  return `written to ${f} (0600; output is not a terminal, so it is not printed). Read it, then delete the file.`;
+}
+
 async function setup(flags: Flags): Promise<number> {
   const home = flags.home ? resolve(String(flags.home)) : defaultHome();
   out(`Orchestrator setup — home: ${home}`);
@@ -332,9 +354,9 @@ async function setup(flags: Flags): Promise<number> {
   }
   const tok = (() => { try { return resolveGitHubToken(cfg); } catch (e) { return `ERR ${(e as Error).message}`; } })();
   if (tok && !tok.startsWith('ERR')) ok('GitHub token found (env, secrets/github-token, or gh CLI)');
-  else warn(`GitHub token not found${tok ? ` (${tok})` : ''}. For GitHub mode create a token (classic PAT with "repo" and "project" scopes, or fine-grained with Issues/PRs/Contents RW for org repos) and save it:\n      install -m 600 /dev/null ${join(paths(cfg).secrets, 'github-token')} && $EDITOR ${join(paths(cfg).secrets, 'github-token')}`);
-  if (!findBwrap()) warn('bubblewrap not available: quality gates run without an OS sandbox (install the "bubblewrap" package)'); else ok('bubblewrap sandbox available');
-  if (token) out(`\nDashboard token (shown once — store it in your password manager):\n  ${token}\nDashboard: http://${cfg.dashboard.host}:${cfg.dashboard.port}/`);
+  else warn(`GitHub token not found${tok ? ` (${tok})` : ''}. For GitHub mode create a token (classic PAT with "repo", "project" and "workflow" scopes, or fine-grained with Issues/PRs/Contents RW for org repos) and save it:\n      install -m 600 /dev/null ${join(paths(cfg).secrets, 'github-token')} && $EDITOR ${join(paths(cfg).secrets, 'github-token')}`);
+  if (!findBwrap()) warn(sandboxAdvice(cfg)); else ok('bubblewrap sandbox works (with /proc, /tmp and all namespaces, as agents and gates use it)');
+  if (token) out(`\nDashboard token (store it in your password manager):\n  ${revealToken(cfg, token)}\nDashboard: http://${cfg.dashboard.host}:${cfg.dashboard.port}/`);
   if (flags.service) installUserService(cfg);
   else out('\nRun `orchestrator setup --service` to install a systemd user service, or `orchestrator run` to run in the foreground.');
   ctx.db.close();
@@ -369,7 +391,9 @@ async function doctor(flags: Flags): Promise<number> {
   (maj! > 22 || (maj === 22 && min! >= 13) ? ok : fail)(`Node ${process.versions.node} (need >= 22.13)`);
   try { ok(execFileSync('git', ['--version'], { encoding: 'utf8' }).trim()); } catch { fail('git not installed'); }
   try { execFileSync('tar', ['--version'], { stdio: 'ignore' }); ok('tar available'); } catch { fail('tar not installed'); }
-  (findBwrap() ? ok : warn)(findBwrap() ? 'bubblewrap sandbox works' : 'bubblewrap unavailable: gates are not OS-sandboxed (install "bubblewrap")');
+  const optedOut = cfg.security.sandbox === 'none' && cfg.security.agentSandbox === 'none';
+  if (findBwrap()) ok('bubblewrap sandbox works here (with /proc, /tmp and all namespaces, as agents and gates use it)');
+  else (optedOut ? warn : fail)(sandboxAdvice(cfg));
   if (!existsSync(configPath(cfg.home))) { fail('not set up: run `orchestrator setup`'); return 1; }
   try { loadConfig(cfg.home); ok('configuration valid'); } catch (e) { fail((e as Error).message); }
   const mode = statSync(configPath(cfg.home)).mode & 0o777;
@@ -404,6 +428,10 @@ async function doctor(flags: Flags): Promise<number> {
   } catch (e) { fail(`GitHub check failed: ${(e as Error).message}`); }
   const pid = daemonPid(cfg);
   (pid ? ok : warn)(pid ? `supervisor running (pid ${pid})` : 'supervisor not running');
+  // The service may run under different restrictions (systemd) than this shell: report what the supervisor itself saw.
+  const sbx = ctx.db.get<{ type: string; message: string }>("SELECT type, message FROM events WHERE type IN ('security.sandbox_ok','security.sandbox_unavailable','security.sandbox') ORDER BY id DESC LIMIT 1");
+  if (sbx?.type === 'security.sandbox_unavailable') fail(`the supervisor's own sandbox self-check failed at its last start (agents are not dispatched): ${sbx.message}`);
+  else if (sbx?.type === 'security.sandbox_ok') ok('supervisor sandbox self-check passed at its last start (inside its own service environment)');
   if (!/^(127\.0\.0\.1|localhost|::1)$/.test(cfg.dashboard.host)) warn(`dashboard bound to ${cfg.dashboard.host}: ensure TLS termination and network restrictions in front of it`);
   if (!cfg.dashboard.tokenHash) fail('dashboard token not configured: run `orchestrator dashboard-token`');
   ctx.db.close();

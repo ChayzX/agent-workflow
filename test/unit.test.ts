@@ -299,3 +299,57 @@ test('a killed provider run reports the signal, not the opaque event stream', as
   assert.doesNotMatch(r.failure!.message, /FllKi8a/);
   rmSync(d, { recursive: true, force: true });
 });
+
+test('systemd units keep settings that break bubblewrap out (operator verification #49/#53)', () => {
+  const directives = (f: string) => readFileSync(join(process.cwd(), 'deploy', 'systemd', f), 'utf8').split('\n').filter((l) => !l.trim().startsWith('#')).join('\n');
+  const user = directives('orchestrator-user.service');
+  const sys = directives('orchestrator.service');
+  assert.doesNotMatch(user, /^PrivateTmp=/m, 'PrivateTmp in a user unit prevents bubblewrap namespaces');
+  assert.doesNotMatch(sys, /^ProtectKernelTunables=/m, 'breaks the /proc mount of every sandbox');
+  assert.doesNotMatch(sys, /^ProtectKernelLogs=/m, 'breaks the /proc mount of every sandbox');
+  assert.match(sys, /^NoNewPrivileges=yes$/m);
+  assert.match(sys, /^ProtectSystem=strict$/m);
+});
+
+test('capacity (operator verification): a usage limit without a reset time is corrected by an immediate usage-free probe; an early "available" is not trusted', async () => {
+  const { CapacityManager } = await import('../src/engine/capacity.js');
+  const db = new Db(':memory:');
+  const clock = new ManualClock(Date.UTC(2026, 10, 27, 23, 30, 0));
+  const cap = new CapacityManager(db, clock, defaultConfig('/tmp/x'), new EventLog(db, clock));
+  const providerReset = Date.UTC(2026, 10, 28, 2, 32, 39);
+  let answer: any = { available: false, resetAt: providerReset, windows: [{ window: 'primary_300m', status: 'rejected', resetsAt: providerReset }] };
+  let probes = 0;
+  const adapter: any = { capabilities: () => ({ capacityProbe: 'non-model' }), probeCapacity: async () => { probes++; return answer; } };
+  cap.recordFailure('codex', { cls: 'usage_limit', message: 'You have hit your usage limit.' });
+  assert.equal(cap.get('codex').reset_source, 'backoff', 'estimated first');
+  await cap.tick(new Map([['codex', adapter]]));
+  assert.equal(probes, 1, 'probed at once, not after the backoff');
+  assert.equal(cap.get('codex').reset_at, providerReset);
+  assert.equal(cap.get('codex').reset_source, 'provider');
+  assert.equal(cap.get('codex').limit_kind, 'primary_300m');
+  await cap.tick(new Map([['codex', adapter]]));
+  assert.equal(probes, 1, 'no repeated early probes once the provider reset is known');
+  // Early probe that claims capacity right after a refusal: keep the estimate, do not flap.
+  cap.recordFailure('claude', { cls: 'usage_limit', message: 'limit' });
+  answer = { available: true, resetAt: null, windows: [] };
+  await cap.tick(new Map([['claude', adapter]]));
+  assert.equal(cap.get('claude').status, 'exhausted');
+  await cap.tick(new Map([['claude', adapter]]));
+  assert.equal(probes, 2, 'one early probe only');
+  db.close();
+});
+
+test('capacity (PR #63 review N5): an early probe answering "limited" without a reset keeps the estimate (no double backoff)', async () => {
+  const { CapacityManager } = await import('../src/engine/capacity.js');
+  const db = new Db(':memory:');
+  const clock = new ManualClock(Date.UTC(2026, 10, 27, 23, 30, 0));
+  const cap = new CapacityManager(db, clock, defaultConfig('/tmp/x'), new EventLog(db, clock));
+  const adapter: any = { capabilities: () => ({ capacityProbe: 'non-model' }), probeCapacity: async () => ({ available: false, resetAt: null, windows: [], detail: 'auth_required' }) };
+  cap.recordFailure('codex', { cls: 'usage_limit', message: 'limit' });
+  const est = cap.get('codex');
+  await cap.tick(new Map([['codex', adapter]]));
+  const after = cap.get('codex');
+  assert.equal(after.reset_at, est.reset_at, 'estimate unchanged');
+  assert.equal(after.backoff_level, est.backoff_level, 'backoff not escalated twice');
+  db.close();
+});

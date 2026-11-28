@@ -1,0 +1,18 @@
+# C6 external reconciliation (live-acceptance §2.6)
+00:53:30Z $ gh issue close 20 --reason "not planned"   (W-007)        -> exit 0
+00:54:08Z work_items W-007: backlog -> cancelled; audit_log #27 actor=github action=workitem.descoped target=W-007   => PASS (cancelled + audited, ~38 s)
+00:59:41Z $ gh issue reopen 20                                         -> exit 0
+01:04:42Z work_items W-007 still 'cancelled' after 5 min                => FAIL (expected: returns to 'ready')
+  cause: src/github/sync.ts:265  `if (i.state === 'open' && localClosed && w.status !== 'cancelled') changes.push({..'reopened'})` excludes cancelled items from reopen.
+
+# Related defect found during C4/C6: merged work item reopened by reconciliation
+00:50:16Z PR #21 merged (W-001); audit_log #26 github.merge sha=2c2abcbf...
+00:51:05Z work_items W-001: merged -> ready ('reopened on GitHub', src/engine/workflow.ts:585); no audit_log entry
+  cause: PR body says "Implements #14" (not a closing keyword), so issue #14 stays OPEN after the merge; sync.ts:265 treats open-issue + merged-item as an external reopen.
+  GitHub: #14 state=OPEN after merge.
+2026-11-28 00:39:38Z warn  approval.requested     Approval required: human_review_required — PR #21 (W-001) requires a human review per repository rules: {"message":"At least 1 approving review is required by reviewers with write access. Required status check \"npm test\" is expected.","documentation_url":"https://docs.github.com/articles/about-protected-branches","status":"405"}. Review and approve the PR on GitHub first (the orchestrator never impersonates reviewers), then approve here to let the merge proceed.
+2026-11-28 00:51:22Z info  message.posted         finding → engineering_director: The W-002 branch was created from 2e631b6, before the W-001 scaffold merged on main (e38babe). I added byte-identical copies of the scaffold files so the gates 
+{"id":30,"ts":1795832009870,"actor":"github","action":"workitem.descoped","project_id":"prj_d5dddd0c147541cd96e0","target":"W-001","detail":"{}","prev_hash":"0580d2c2e6eec70cd94cbad2acb93f28c6472e857229d1084bc0036052eda992","hash":"5b14fe6b6c503c9816b43bc584e49ac11f6aef863880dc55bb5c5155483dc76d"}
+{"id":29,"ts":1795827968139,"actor":"supervisor","action":"approval.requested","project_id":"prj_d5dddd0c147541cd96e0","target":"appr_f3b6b80f7e2d417a9227","detail":"{\"action\":\"human_review_required\",\"reason\":\"PR #22 (W-002) requires a human review per repository rules: {\\\"message\\\":\\\"At least 1 approving review is required by reviewers with write access. Required status check \\\\\\\
+{"id":28,"ts":1795827966344,"actor":"supervisor","action":"git.push","project_id":"prj_d5dddd0c147541cd96e0","target":"orch/w-002-implement-core-counting-module","detail":"{\"pr\":22,\"sha\":\"e31ed13281e555db941598794910c06fe0e18cf3\"}","prev_hash":"5b2880adb1e4ffe391fe64079efe9fc6de609c1268518da5b3db33fca9909ca0","hash":"5865949762c718418cf4bde8b319faed9f2aea24300ba97be8a3eddc588f110b"}
+{"key":"W-001","status":"cancelled","status_reason":"closed as not planned on GitHub by operator","merged_commit":"e38babe4465ebf7cab446152c93c10825fdc81f1","updated_at":1795832009869,"updated":"2026-11-28T02:13:29.869Z"}

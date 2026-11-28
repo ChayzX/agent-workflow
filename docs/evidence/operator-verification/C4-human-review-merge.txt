@@ -1,0 +1,18 @@
+GitHub: homeybeam APPROVED commit=2c2abcbf 2026-11-28T00:49:39Z; head=2c2abcbf23432f9498376300c8841906f731395b; operator said 'approval submitted now' / 'Reviewed, approve it'
+$ orchestrator approvals approve appr_0664193db9a94a819186
+appr_0664193db9a94a819186 approved
+exit=0
+2026-11-28 00:39:38Z warn  approval.requested     Approval required: human_review_required — PR #21 (W-001) requires a human review per repository rules: {"message":"At least 1 approving review is required by reviewers with write access. Required status check \"npm test\" is expected.","documentation_url":"https://docs.github.com/articles/about-protected-branches","status":"405"}. Review and approve the PR on GitHub first (the orchestrator never impersonates reviewers), then approve here to let the merge proceed.
+2026-11-28 00:50:19Z info  gates.completed        post-merge gates on e38babe4: PASS (Unit and end-to-end tests=pass, Syntax check of all JavaScript sources=pass, Package contents check=pass, CLI smoke run=pass, secret-scan=pass)
+2026-11-28 00:51:22Z info  message.posted         finding → engineering_director: The W-002 branch was created from 2e631b6, before the W-001 scaffold merged on main (e38babe). I added byte-identical copies of the scaffold files so the gates 
+## 2026-11-28T02:20:30Z required_pull_request_reviews removed from main (user-approved); npm test check still required, strict, enforce_admins
+$ orchestrator approvals approve appr_f3b6b80f7e2d417a9227
+appr_f3b6b80f7e2d417a9227 approved
+exit=0
+## PR #22 merged 2026-11-28T02:20:35Z as c31cf021 (head e31ed132)
+2026-11-28 01:03:59Z info  task.started           remediate W-002 → claude/opus (new, same provider as excluded (cross-provider unavailable))
+2026-11-28 01:05:01Z info  task.started           verify_fix W-002 → claude/sonnet (new, same provider as excluded (cross-provider unavailable))
+2026-11-28 01:06:03Z info  task.started           answer W-002 → claude/sonnet (new, same provider as excluded (cross-provider unavailable))
+2026-11-28 01:06:08Z warn  approval.requested     Approval required: human_review_required — PR #22 (W-002) requires a human review per repository rules: {"message":"At least 1 approving review is required by reviewers with write access. Required status check \"npm test\" is expected.","documentation_url":"https://docs.github.com/articles/about-protected-branches","status":"405"}. Review and approve the PR on GitHub first (the orchestrator never impersonates reviewers), then approve here to let the merge proceed.
+2026-11-28 02:20:38Z info  gates.completed        post-merge gates on c31cf021: PASS (Unit and end-to-end tests=pass, Syntax check of all JavaScript sources=pass, Package contents check=pass, CLI smoke run=pass, secret-scan=pass)
+  Work items: backlog=2 cancelled=2 implementing=3
