@@ -1,6 +1,6 @@
 {
   "name": "agent-workflow-orchestrator",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Autonomous engineering orchestrator: turns a natural-language goal into a reviewed, tested, packaged product using Codex and Claude Code agents.",
   "license": "MIT",
   "type": "module",

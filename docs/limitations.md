@@ -11,6 +11,9 @@ Stated plainly so nothing is over-claimed. See `docs/acceptance-matrix.md` for w
 - **Fine-grained PATs cannot manage user-owned Projects (v2)** (a GitHub limitation). Use a classic PAT with `repo`,
   `project` and `workflow` scopes for personal repositories. Without `workflow`, GitHub refuses any push that touches
   `.github/workflows/`; the orchestrator then blocks that item with the exact fix instead of retrying.
+- **Issues first synced by 0.1.0 have no recorded state.** On the first reconcile after upgrading, an open issue of a
+  finished item is treated as sync lag and re-closed once (a human reopen made before the upgrade is not detected);
+  from then on, state is recorded and human changes are tracked exactly.
 - **A GitHub issue has at most one sub-issue parent** (a GitHub rule). A work item that covers several requirements
   appears as a sub-issue of the first requirement only; its other requirements reference it in the issue body.
 - **The live GitHub run (operator verification, 2026-11-28)** exercised issues, sub-issues, dependencies, Projects

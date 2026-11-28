@@ -49,7 +49,7 @@ export function fakeGitHub() {
     if (m) {
       const i = s.issues.find((x) => x.number === Number(m![1]));
       if (!i) return json(404, { message: 'Not Found' });
-      if (method === 'PATCH') { Object.assign(i, { title: body.title, body: body.body, labels: body.labels.map((name: string) => ({ name })), ...(body.state ? { state: body.state, state_reason: body.state_reason ?? null } : {}) }); }
+      if (method === 'PATCH') { Object.assign(i, { ...(body.title !== undefined ? { title: body.title } : {}), ...(body.body !== undefined ? { body: body.body } : {}), ...(body.labels ? { labels: body.labels.map((name: string) => ({ name })) } : {}), ...(body.state ? { state: body.state, state_reason: body.state_reason ?? null } : {}) }); }
       return json(200, i);
     }
     m = /^\/issues\/(\d+)\/sub_issues$/.exec(path);
@@ -242,4 +242,29 @@ test('github (PR #63 review B2/N1/N2): a reverted close is reported once and res
   // ...but never read "merged locally, issue still open" as a reopen.
   issue('W-001').state = 'open';
   assert.ok(!(await sync.reconcileExternal(store)).some((c) => c.key === 'W-001'));
+});
+
+test('github (PR #63 re-review): finished items are closed at first sync; legacy mappings are re-synced once and then tracked', async () => {
+  const { db, store, fake, sync, clock } = setup();
+  // An item already cancelled before its first sync gets a closed issue, recorded as closed.
+  store.patchWorkItem(store.workItemByKey('p', 'W-002')!.id, { status: 'cancelled' });
+  clock.advance(10);
+  await sync.syncAll(store);
+  const i2 = fake.s.issues.find((i) => i.title.startsWith('W-002'))!;
+  assert.equal(i2.state, 'closed'); assert.equal(i2.state_reason, 'not_planned');
+  // A pre-tracking mapping of a done item whose issue is open: forced re-sync once, then normal tracking.
+  const w1 = store.workItemByKey('p', 'W-001')!;
+  store.patchWorkItem(w1.id, { status: 'done' });
+  clock.advance(10); await sync.syncAll(store);
+  db.run("UPDATE github_objects SET extra='{}', synced_at=? WHERE kind='work-item' AND key='W-001'", clock.now() + 100);
+  const i1 = fake.s.issues.find((i) => i.title.startsWith('W-001'))!;
+  i1.state = 'open';
+  clock.advance(200);
+  assert.deepEqual(await sync.reconcileExternal(store), []);
+  await sync.syncAll(store);
+  assert.equal(i1.state, 'closed', 'issue re-synced to match local state');
+  assert.equal(JSON.parse(db.get<{ extra: string }>("SELECT extra FROM github_objects WHERE kind='work-item' AND key='W-001'")!.extra).state, 'closed', 'state now recorded');
+  i1.state = 'open';
+  clock.advance(10);
+  assert.deepEqual(await sync.reconcileExternal(store), [{ key: 'W-001', change: 'reopened' }], 'later human reopens are tracked');
 });

@@ -3,20 +3,24 @@
 This file is the durable hand-off for the session building this platform. Update it at each
 milestone boundary. Scheduled auto-resume reads "Next executable actions".
 
-## Current milestone (updated 2026-11-27 16:20 UTC)
-- PR #61 merged into main (93ce394) at the independently approved commit 6a50a01. The first review returned
-  REQUEST_CHANGES; every finding was addressed, then the same reviewer approved.
-- `npm test` 56/56. Release `release/agent-workflow-orchestrator-0.1.0.zip` (sha256 fe3dd991…) is built from 93ce394
-  (the PR #61 merge) and was clean-room verified. Later follow-ups (PR #62) are not in the 0.1.0 ZIP.
-- Live evidence: wordfreq (Claude) and greet (Claude + Codex), both with verified releases.
-- GitHub tracking:
-  - Closed with evidence: #17, #19 and epic #3 (M2); #36, #37 and epic #7 (M6); #56, #57 and #60 (acceptance B, C, F).
-  - Everything still open is labelled `needs-operator` with exact requirements: #29–32, #45, #46, #48, #49, #52–55,
-    #58 and epics #5, #9, #10, #11, #12. The run book is docs/operator-verification-prompt.md.
-- This branch: small follow-ups from the re-review (merge-rejection limit restarts after unblock, wording, limitations).
-- **Mission status: complete, except items that genuinely need the operator** (a PAT, a fresh VM, a systemd host,
-  HawkScan, OCI). The hourly auto-resume task is deleted once this follow-up merges.
-- Next optional measurement: a clean live run on one build, to quantify cost without the meta-work loops.
+## Current milestone (updated 2026-11-28 06:00 UTC)
+- The operator verification ran on real infrastructure (Ubuntu 24.04 VM, systemd, live GitHub `ChayzX/orch-acceptance`,
+  HawkScan): `docs/evidence/operator-verification/REPORT.md`. Every major finding was confirmed in the code and fixed in
+  PR #63, merged at 9275518 after REQUEST_CHANGES then APPROVE (the review caught a sandbox home-exposure regression).
+- This branch: the PR #63 re-review follow-ups, plus the 0.1.1 release and CHANGELOG. `npm test` 69/69.
+- The fixes have NOT been re-run on that infrastructure. The operator prefers using the tool on a real project over
+  another test cycle.
+- Next (operator direction, 2026-11-28):
+  1. Run the orchestrator on the operator's real, large project, phase by phase (one milestone per goal), on the VM in
+     GitHub mode. Fix what the run surfaces. The operator will share the project plan.
+  2. Planned infrastructure integration: chasebot as the always-on control plane; the gaming PC (Windows 11 Home,
+     Ryzen 9 7900X, 32 GB, RTX 4070 Ti) as a Wake-on-LAN burst worker; ephemeral VMs (VirtualBox + Terraform, being
+     built by Codex; not pushed yet). Design rules:
+     - only the supervisor runs Terraform, with a bounded module;
+     - VMs are tied to task leases, have a TTL, and are reaped on recovery;
+     - no provider credentials inside VMs;
+     - VMs are network-isolated from the LAN and Pantry Bot.
+  3. Proposed: a per-project session/token budget cap (no such cap exists yet).
 
 ## Verified facts (live evidence, 2026-11-27)
 - Claude Code CLI 2.1.332, subscription OAuth (`apiKeySource: "none"`). `claude -p --output-format stream-json`
