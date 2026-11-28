@@ -3,6 +3,23 @@
 This file is the durable hand-off for the session building this platform. Update it at each
 milestone boundary. Scheduled auto-resume reads "Next executable actions".
 
+## Overnight run 2026-11-28 (hand-off: Tasks 1–4; operator asleep)
+Auto-resume: hourly scheduled task "Overnight auto-resume (agent-workflow)" (this session's). Delete it when the
+overnight work is done. The morning checklist is `docs/MORNING.md` on branch `claude/agent-workflow-overnight-n8eepf`.
+
+| Task | Branch / PR | State |
+|---|---|---|
+| 1. devvm backend onto 0.1.1 | `claude/devvm-backend`, PR #65 | **Merged** 837fe1e after 3 review rounds (APPROVE at 90bc9e3). Low follow-ups carried into Task 2: re-check `--status-file` support on unblock; allow-marker window only for >4000-char lines; "ssh 0 but no status" = gate error. Hardware checks pending (operator). |
+| 2. agent sessions in VMs | `claude/agent-vms` | In progress: src/vm/pool.ts, egress proxy, firewall scripts, image build, test/agent-vm.test.ts. |
+| 3. notifications / agentring | not started | Fake notifier; DB migration v3 after Task 2's v2. |
+| 4. release 0.1.2 code | not started | Bump, CHANGELOG, self-package, clean-room check; no GitHub Release (needs approval). |
+
+Key facts found tonight:
+- Smoke gate 1: a fresh netns `/proc/net/route` is empty on current kernels (no header), so "1 line" is wrong.
+- Claude `setup-token`: documented 1-year token for Pro/Max via CLAUDE_CODE_OAUTH_TOKEN; concurrent multi-machine
+  use not documented. Codex: copying auth.json to a headless machine is documented; Codex refreshes tokens itself;
+  concurrent use and refresh-token rotation are not documented. Both are operator questions in MORNING.md.
+
 ## Current milestone (updated 2026-11-28 06:00 UTC)
 - The operator verification ran on real infrastructure (Ubuntu 24.04 VM, systemd, live GitHub `ChayzX/orch-acceptance`,
   HawkScan): `docs/evidence/operator-verification/REPORT.md`. Every major finding was confirmed in the code and fixed in
